@@ -1,0 +1,19 @@
+{
+  "name": "gift-card-promo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Create a Shopify gift card for every member of a customer segment (Shopify emails it to them on creation), then tag the customer.",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "check": "node index.js --check",
+    "list": "node index.js --list",
+    "run": "node index.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.5"
+  }
+}
