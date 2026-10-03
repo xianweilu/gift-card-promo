@@ -1,4 +1,7 @@
 .env
+.env.test
 progress.json
 progress.json.tmp
 node_modules/
+# campaign data: customer PII, journals, Excel reports, email previews
+campaigns/

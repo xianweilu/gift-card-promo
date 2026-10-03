@@ -111,10 +111,7 @@ export async function gql(query, variables = {}) {
     if (errors.length) {
       const code = errors[0]?.extensions?.code;
       const messages = errors.map((e) => (e.extensions?.code ? `${e.message} [${e.extensions.code}]` : e.message));
-      const hint = errors.some((e) => e.extensions?.code === 'MAX_COST_EXCEEDED')
-        ? ' Hint: lower SEGMENT_PAGE_SIZE in .env.'
-        : '';
-      throw new ShopifyError(`GraphQL error: ${messages.join('; ')}${hint}`, {
+      throw new ShopifyError(`GraphQL error: ${messages.join('; ')}`, {
         outcomeKnown: code !== 'INTERNAL_SERVER_ERROR',
         code,
       });
@@ -122,6 +119,13 @@ export async function gql(query, variables = {}) {
 
     if (body.data === undefined || body.data === null) {
       throw new ShopifyError('Shopify response contained no data', { outcomeKnown: false });
+    }
+
+    // Shopify silently IGNORES a search filter it does not understand and
+    // returns everything; the only signal is a warning here. Treat it as fatal.
+    const searchWarnings = (body.extensions?.search ?? []).flatMap((s) => (s.warnings ?? []).map((w) => `${s.query ?? ''}: ${w.field ?? ''} ${w.message ?? ''}`.trim()));
+    if (searchWarnings.length) {
+      throw new ShopifyError(`Shopify ignored part of a search filter: ${searchWarnings.join('; ')}`, { outcomeKnown: true, code: 'SEARCH_WARNING' });
     }
 
     if (throttle && throttle.currentlyAvailable < LOW_WATER_MARK) {

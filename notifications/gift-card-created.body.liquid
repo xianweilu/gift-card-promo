@@ -1,0 +1,199 @@
+{%- comment -%}
+  "Gift card created" notification – email body.
+
+  Campaign switch: gift cards issued by the gift-card-promo tool carry
+  template_suffix = "gift-card-promo" (GIFT_CARD_TEMPLATE_SUFFIX in .env). Those get the
+  promo version below, which never shows the amount. Gift cards created any other
+  way (issued by hand in the admin, bought in the store) have no suffix and get
+  the original email unchanged.
+
+  The promo version has three stages, chosen by the date the email is sent:
+    before REMIND_1_DATE            → first email (sent when the card is created)
+    REMIND_1_DATE .. REMIND_2_DATE  → first reminder
+    REMIND_2_DATE and later         → second (last) reminder
+  Reminders are re-sends of this same notification (giftCardSendNotificationToCustomer).
+
+  The suffix must match in three places: .env, the notification templates
+  (subject + this body) and the theme's templates/gift_card.gift-card-promo.liquid.
+{%- endcomment -%}
+{%- comment -%} ===== 活动日期：由 node index.js preview 按 .env 自动更新，请勿手改 ===== {%- endcomment -%}
+{%- assign promo_remind_1 = 20261012 -%}
+{%- assign promo_remind_2 = 20261016 -%}
+{%- comment -%} ===== 活动日期结束 ===== {%- endcomment -%}
+{%- assign promo_suffix = 'gift-card-promo' -%}
+{%- assign is_promo = false -%}
+{%- if gift_card.template_suffix == promo_suffix -%}{%- assign is_promo = true -%}{%- endif -%}
+{%- assign promo_today = 'now' | date: '%Y%m%d' | plus: 0 -%}
+{%- assign promo_stage = 'first' -%}
+{%- if promo_today >= promo_remind_2 -%}{%- assign promo_stage = 'remind2' -%}{%- elsif promo_today >= promo_remind_1 -%}{%- assign promo_stage = 'remind1' -%}{%- endif -%}
+{%- assign promo_valid_through = '' -%}
+{%- if gift_card.expires_on -%}{%- capture promo_valid_through -%}{{ gift_card.expires_on | date: '%B %-d, %Y' }}{%- endcapture -%}{%- endif -%}
+{%- capture promo_legal -%}{%- if promo_valid_through != '' -%}<p style="font-size: 14px; font-weight: bold; letter-spacing: 1px; text-transform: uppercase; margin: 0 0 16px 0;">PROMOTIONAL GIFT CARD · VALID THROUGH {{ promo_valid_through | upcase }}</p>{%- endif -%}{%- endcapture -%}
+
+{% if is_promo %}
+{% if promo_stage == 'remind2' %}
+{% capture email_title %}Last chance to use your credit{% endcapture %}
+{% capture email_body %}<center>{{ promo_legal }}Hi{% if gift_card.customer %} {{ gift_card.customer.first_name }}{% endif %}, this is your final reminder: your exclusive Online Credit Code{% if promo_valid_through != '' %} can be used through {{ promo_valid_through }}{% endif %}.<br><br>Don't let it go to waste. Tap the button below to reveal it and use it on your next order.<br><br>Treat this code like cash and save this email for future reference.</center>{% endcapture %}
+{% capture button_text %}Use your Online Credit Code{% endcapture %}
+{% elsif promo_stage == 'remind1' %}
+{% capture email_title %}Your surprise is still waiting{% endcapture %}
+{% capture email_body %}<center>{{ promo_legal }}Hi{% if gift_card.customer %} {{ gift_card.customer.first_name }}{% endif %}, your exclusive Online Credit Code from {{ shop.name }} hasn't been used yet.<br><br>{% if promo_valid_through != '' %}It's valid through {{ promo_valid_through }}. {% endif %}Tap the button below to reveal it and treat yourself.<br><br>Treat this code like cash and save this email for future reference.</center>{% endcapture %}
+{% capture button_text %}Reveal your Online Credit Code{% endcapture %}
+{% else %}
+{% capture email_title %}A little surprise, just for you{% endcapture %}
+{% capture email_body %}<center>{{ promo_legal }}Hi{% if gift_card.customer %} {{ gift_card.customer.first_name }}{% endif %}, we've set aside an exclusive Online Credit Code with your name on it, as a thank-you for being part of the {{ shop.name }} family.<br><br>How much is it worth? Tap the button below to reveal your code and find out.<br><br>{% if promo_valid_through != '' %}Your code is valid through {{ promo_valid_through }}. {% endif %}Treat this code like cash and save this email for future reference.</center>{% endcapture %}
+{% capture button_text %}Reveal your Online Credit Code{% endcapture %}
+{% endif %}
+{% else %}
+{% capture email_title %}Your Online Credit Code is now available! {% endcapture %}
+{% capture email_body %}<center>Hi{% if gift_card.customer %} {{ gift_card.customer.first_name }}{% endif %}, here is your {{ gift_card.balance | money_without_trailing_zeros }} online credit code.<br><br>Treat this code like cash and save this email for future reference.</center>{% endcapture %}
+{% capture button_text %}View your Online Credit Code{% endcapture %}
+{% endif %}
+<!-- promo-stage: {% if is_promo %}{{ promo_stage }}{% else %}original{% endif %} -->
+
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+  <title>{{ email_title }}</title>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+  <meta name="viewport" content="width=device-width">
+  <link rel="stylesheet" type="text/css" href="/assets/notifications/styles.css">
+  <style>
+    .button__cell { background: {{ shop.email_accent_color }}; }
+    a, a:hover, a:active, a:visited { color: {{ shop.email_accent_color }}; }
+  </style>
+</head>
+
+  <body>
+    <table class="body">
+      <tr>
+        <td>
+          <table class="header row">
+  <tr>
+    <td class="header__cell">
+      <center>
+
+        <table class="container">
+          <tr>
+            <td>
+
+      <table class="row">
+                <tr>
+                  <td class="shop-name__cell">
+                    {%- if shop.email_logo_url %}
+                      <center><img src="{{shop.email_logo_url}}" alt="{{ shop.name }}" width="{{ shop.email_logo_width }}">
+                    {%- else %}
+                      <h1 class="shop-name__text">
+                        <a href="{{shop.url}}">{{ shop.name }}</a>
+                      </h1></center>
+                    {%- endif %}
+                  </td>
+
+ <tr><td><center>
+                            <br><h2>{{ email_title }}</h2></td></tr>
+                    <td class="order-number__cell"><center>
+                      <span class="order-number__text">
+                        {{ order_name }}</center>
+                      </span>
+
+                </tr>
+              </table>
+
+            </td>
+          </tr>
+        </table>
+
+      </center>
+    </td>
+  </tr>
+</table>
+
+          <table class="row content">
+  <tr>
+    <td class="content__cell">
+      <center>
+        <table class="container">
+          <tr>
+            <td>
+
+
+            <p>{{ email_body }}</p>
+            {%- comment -%}
+              Shopify's notification stylesheet floats .main-action-cell to the left.
+              align="center" plus the inline styles override that so the button and
+              the "Visit our store" link sit centered under the centered text.
+            {%- endcomment -%}
+            <table class="row actions">
+  <tr>
+    <td class="actions__cell" align="center" style="text-align: center;">
+      <table class="button main-action-cell" align="center" style="float: none; margin-left: auto; margin-right: auto;">
+        <tr>
+          <td class="button__cell"><a href="{{ gift_card.url }}" class="button__text">{{ button_text }}</a></td>
+        </tr>
+      </table>
+      {% if shop.url %}
+    <table class="link secondary-action-cell" align="center" style="margin: 20px auto 0 auto;">
+      <tr>
+        <td class="link__cell" align="center" style="text-align: center;"><a href="{{ shop.url }}" class="link__text"><span class='or'>or</span> Visit our store</a></td>
+      </tr>
+    </table>
+{% endif %}
+
+    </td>
+  </tr>
+</table>
+
+
+            {% if gift_card.pass_url %}
+              <a href="{{ gift_card.pass_url }}" class="apple-wallet-button">
+                <img src="{{ 'gift-card/add-to-apple-wallet.png' | shopify_asset_url }}" alt="Add to Apple Wallet" width="120" height="40">
+              </a>
+            {% endif %}
+
+            </td>
+          </tr>
+        </table>
+      </center>
+    </td>
+  </tr>
+</table>
+          <table class="row footer">
+  <tr>
+    <td class="footer__cell">
+      <center>
+        <table class="container">
+          <tr>
+            <td>
+              <p class="disclaimer__subtext"><center>If you have any questions, reply to this email or contact us at <a href="mailto:Help@LABalloons.com">Help@LABalloons.com</center></a></p>
+            </td>
+          </tr>
+        </table>
+      </center>
+    </td>
+  </tr>
+</table>
+
+<img src="{{ 'notifications/spacer.png' | shopify_asset_url }}" class="spacer" height="1" />
+             <p align="center"><span style="font-weight: bold;">Follow Us:</span></p> <p align="center"><a href="https://www.instagram.com/l.a.balloons/">
+<img src="https://cdn.shopify.com/s/files/1/0006/2196/9471/files/laballoons_instragram.gif?v=1607165260" width=50 height=“50"</a>
+
+<a href="https://www.facebook.com/LABalloons/">
+<img src="https://cdn.shopify.com/s/files/1/0006/2196/9471/files/laballoons_facebook.gif?v=1607165274" width=50 height=“50"</a>
+
+<a href="https://www.pinterest.com/laballoons/_shop/">
+<img src="https://cdn.shopify.com/s/files/1/0006/2196/9471/files/laballoons_pinterest.gif?v=1607165287" width=50 height=“50"</a>
+
+<a href="https://www.youtube.com/channel/UCncB_WqAl-TZ2F4eEmcxl-A/playlists">
+<img src="https://cdn.shopify.com/s/files/1/0006/2196/9471/files/laballoons_youtube.gif?v=1607165301" width=50 height=“50"</a></p><br />
+
+<p align="center"><span style="font-weight: bold;">LA Balloons</span><br />
+   1422 Gardena Ave., Glendale, CA 91204 <br />
+   1-818-246-9404<br />
+   <a href="mailto:Help@LABalloons.com">Help@LABalloons.com</a></p>
+<p align="center">© <a href="http://www.LABalloons.com">LABalloons.com</a></p>
+
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
