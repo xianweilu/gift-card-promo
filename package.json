@@ -1,19 +1,24 @@
 {
   "name": "gift-card-promo",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Create a Shopify gift card for every member of a customer segment (Shopify emails it to them on creation), then tag the customer.",
+  "description": "Promotional Shopify gift-card campaign in reviewed steps (select, issue, remind, usage, verify); every step rewrites a read-only Excel report.",
   "type": "module",
   "engines": {
-    "node": ">=18"
+    "node": ">=20.6"
   },
   "scripts": {
-    "check": "node index.js --check",
-    "list": "node index.js --list",
-    "run": "node index.js",
+    "check": "node index.js check",
+    "select": "node index.js select",
+    "export": "node index.js export",
+    "preview": "node index.js preview",
+    "usage": "node index.js usage",
+    "verify": "node index.js verify",
     "test": "node --test test/*.test.js"
   },
   "dependencies": {
-    "dotenv": "^18.0.5"
+    "dotenv": "^18.0.5",
+    "exceljs": "4.4.0",
+    "liquidjs": "10.30.0"
   }
 }

@@ -11,7 +11,17 @@ export class ConfigError extends Error {
   }
 }
 
-const REQUIRED = ['SHOP', 'CLIENT_ID', 'CLIENT_SECRET', 'SEGMENT_ID', 'SENT_TAG'];
+const REQUIRED = ['SHOP', 'CLIENT_ID', 'CLIENT_SECRET', 'CAMPAIGN_ID', 'SENT_TAG'];
+
+// Defaults agreed for the 2026-10 campaign. An explicitly empty value in .env
+// (e.g. `EXCLUDE_TAGS=`) means "none"; leaving the key out uses the default.
+export const DEFAULT_EXCLUDE_TAGS = 'WHS,PotentiallyWHS,DISC,level1A,level2A,DO NOT SELL,likely-fake-account,walmart.com,Walmart,Amazon,eBay';
+// Marketplace relay/placeholder domains, plus company domains the owner excluded (2026-10).
+export const DEFAULT_EXCLUDE_EMAIL_DOMAINS = 'example.com,mail.codisto.com,connectebay.com,marketplace.amazon.com,relay.walmart.com,members.ebay.com,jokerpartysupply.com,loftus.com,burtonandburton.com,mayflower.com,toyworld.com,rainbowballoons.com';
+export const DEFAULT_GIFT_TIERS = '10.77,15.33,19.77';
+// Order.sourceName values. The numeric ones are Shopify app ids:
+// 205641 = Sellbrite, 1456995 = CedCommerce Walmart Connector, 1775805 = eBay.
+export const DEFAULT_EXCLUDE_ORDER_SOURCES = 'amazon,walmart,ebay,etsy,205641,1456995,1775805';
 
 /** Trimmed string value of env[key]; `fallback` when unset or blank. */
 function str(env, key, fallback = '') {
@@ -20,12 +30,81 @@ function str(env, key, fallback = '') {
   return value || fallback;
 }
 
+/** Comma-separated list. Unset key → fallback list; set-but-empty → []. */
+function list(env, key, fallback) {
+  const raw = env[key] === undefined || env[key] === null ? fallback : String(env[key]);
+  return raw.split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+function int(env, key, fallback, { min, max }) {
+  const raw = str(env, key, String(fallback));
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < min || n > max) {
+    throw new ConfigError(`${key} must be an integer from ${min} to ${max}, got "${raw}"`);
+  }
+  return n;
+}
+
+function bool(env, key, fallback) {
+  const raw = str(env, key, fallback ? 'true' : 'false').toLowerCase();
+  if (['true', '1', 'yes'].includes(raw)) return true;
+  if (['false', '0', 'no'].includes(raw)) return false;
+  throw new ConfigError(`${key} must be true or false, got "${raw}"`);
+}
+
+/** Dollar amount like "20" or "0.10" → integer cents. */
+function dollars(env, key, fallback, { minCents, maxCents }) {
+  const raw = str(env, key, fallback);
+  if (!/^\d+(\.\d{1,2})?$/.test(raw)) throw new ConfigError(`${key} must be a dollar amount like 20 or 0.10, got "${raw}"`);
+  const cents = Math.round(Number(raw) * 100);
+  if (cents < minCents || cents > maxCents) {
+    throw new ConfigError(`${key} must be between $${(minCents / 100).toFixed(2)} and $${(maxCents / 100).toFixed(2)}, got "${raw}"`);
+  }
+  return cents;
+}
+
+/** "YYYY-MM-DD" (a calendar date in the store's time zone) or '' when optional. */
+function dateValue(env, key, { required = false } = {}) {
+  const v = str(env, key);
+  if (!v) {
+    if (required) throw new ConfigError(`${key} is required (format YYYY-MM-DD, e.g. 2026-10-05)`);
+    return '';
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v) || Number.isNaN(Date.parse(`${v}T00:00:00Z`)) || new Date(`${v}T00:00:00Z`).toISOString().slice(0, 10) !== v) {
+    throw new ConfigError(`${key} must be a real date in the format YYYY-MM-DD (e.g. 2026-10-05), got "${v}"`);
+  }
+  return v;
+}
+
+/** GIFT_TIERS="10.77,15.33,19.77" → [1077, 1533, 1977] (strictly increasing, positive). */
+function tiers(env, key, fallback) {
+  const raw = str(env, key, fallback);
+  const parts = raw.split(',').map((x) => x.trim()).filter(Boolean);
+  if (!parts.length) throw new ConfigError(`${key} must list at least one amount, e.g. 10.77,15.33,19.77`);
+  const cents = parts.map((x) => {
+    if (!/^\d+(\.\d{1,2})?$/.test(x)) throw new ConfigError(`${key} entries must be dollar amounts like 10.77, got "${x}"`);
+    return Math.round(Number(x) * 100);
+  });
+  for (let i = 0; i < cents.length; i += 1) {
+    if (cents[i] <= 0 || cents[i] > 200000) throw new ConfigError(`${key} amounts must be between $0.01 and $2,000.00, got "${parts[i]}"`);
+    if (i && cents[i] <= cents[i - 1]) throw new ConfigError(`${key} must be strictly increasing, got "${raw}"`);
+  }
+  return cents;
+}
+
+function customerGid(raw) {
+  const v = String(raw).trim();
+  if (/^\d+$/.test(v)) return `gid://shopify/Customer/${v}`;
+  if (/^gid:\/\/shopify\/Customer\/\d+$/.test(v)) return v;
+  throw new ConfigError(`TEST_CUSTOMER_IDS entries must be customer ids, got "${v}"`);
+}
+
 /**
  * Load and validate configuration.
  *
  * Reads `.env` from the project root unless `envFile` is false. dotenv never
  * overrides variables that are already set in the environment, so
- * `DRY_RUN=false node index.js` takes precedence over the value in `.env`.
+ * `DRY_RUN=false node index.js issue` takes precedence over the value in `.env`.
  */
 export function loadConfig(env = process.env, { envFile = path.join(ROOT_DIR, '.env') } = {}) {
   if (envFile) dotenv.config({ path: envFile, processEnv: env, quiet: true });
@@ -44,40 +123,60 @@ export function loadConfig(env = process.env, { envFile = path.join(ROOT_DIR, '.
   }
 
   const apiVersion = str(env, 'API_VERSION', '2026-07');
-  if (!/^(\d{4}-\d{2}|unstable)$/.test(apiVersion)) {
-    throw new ConfigError(`API_VERSION must look like 2026-07, got "${apiVersion}"`);
+  if (!/^\d{4}-\d{2}$/.test(apiVersion)) {
+    throw new ConfigError(`API_VERSION must look like 2026-07, got "${apiVersion}" (unstable is not allowed for live campaigns)`);
   }
 
-  const segmentId = str(env, 'SEGMENT_ID');
-  if (!/^gid:\/\/shopify\/Segment\/\d+$/.test(segmentId)) {
-    throw new ConfigError(`SEGMENT_ID must look like gid://shopify/Segment/<number>, got "${segmentId}"`);
+  const campaignId = str(env, 'CAMPAIGN_ID');
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(campaignId)) {
+    throw new ConfigError(`CAMPAIGN_ID may only contain letters, digits, ".", "_" and "-", got "${campaignId}"`);
   }
 
-  const pageSizeRaw = str(env, 'SEGMENT_PAGE_SIZE', '250');
-  const segmentPageSize = Number(pageSizeRaw);
-  if (!Number.isInteger(segmentPageSize) || segmentPageSize < 1 || segmentPageSize > 1000) {
-    throw new ConfigError(`SEGMENT_PAGE_SIZE must be an integer from 1 to 1000, got "${pageSizeRaw}"`);
+  const sentTag = str(env, 'SENT_TAG');
+  if (sentTag.includes(',')) {
+    throw new ConfigError('SENT_TAG must not contain a comma (tagsAdd would split it into several tags)');
   }
 
-  const valueRaw = str(env, 'GIFT_CARD_VALUE', '0.10');
-  const giftCardValue = Number(valueRaw);
-  if (!Number.isFinite(giftCardValue) || giftCardValue <= 0 || giftCardValue > 2000) {
-    throw new ConfigError(`GIFT_CARD_VALUE must be a number greater than 0 and at most 2000, got "${valueRaw}"`);
+  const giftPercentRaw = str(env, 'GIFT_PERCENT', '10');
+  const giftPercent = Number(giftPercentRaw);
+  if (!Number.isFinite(giftPercent) || giftPercent <= 0 || giftPercent > 100) {
+    throw new ConfigError(`GIFT_PERCENT must be a number greater than 0 and at most 100, got "${giftPercentRaw}"`);
   }
+  const giftTiersCents = tiers(env, 'GIFT_TIERS', DEFAULT_GIFT_TIERS);
 
   const giftCardCurrency = str(env, 'GIFT_CARD_CURRENCY', 'USD').toUpperCase();
   if (!/^[A-Z]{3}$/.test(giftCardCurrency)) {
     throw new ConfigError(`GIFT_CARD_CURRENCY must be a 3-letter ISO code, got "${giftCardCurrency}"`);
   }
 
-  const giftCardExpiresOn = str(env, 'GIFT_CARD_EXPIRES_ON');
-  if (giftCardExpiresOn && !/^\d{4}-\d{2}-\d{2}$/.test(giftCardExpiresOn)) {
-    throw new ConfigError(`GIFT_CARD_EXPIRES_ON must be YYYY-MM-DD or empty, got "${giftCardExpiresOn}"`);
+  // Campaign dates, calendar days in the store's time zone. LAUNCH/REMIND dates
+  // gate issue/remind (live campaigns only); the expiry is the last usable day.
+  const giftCardExpiresOn = dateValue(env, 'GIFT_CARD_EXPIRES_ON');
+  const launchDate = dateValue(env, 'LAUNCH_DATE');
+  const remind1Date = dateValue(env, 'REMIND_1_DATE');
+  const remind2Date = dateValue(env, 'REMIND_2_DATE');
+  const ordered = [['LAUNCH_DATE', launchDate], ['REMIND_1_DATE', remind1Date], ['REMIND_2_DATE', remind2Date]].filter(([, v]) => v);
+  for (let i = 1; i < ordered.length; i += 1) {
+    if (!(ordered[i - 1][1] < ordered[i][1])) {
+      throw new ConfigError(`${ordered[i - 1][0]} (${ordered[i - 1][1]}) must be earlier than ${ordered[i][0]} (${ordered[i][1]})`);
+    }
+  }
+  if (giftCardExpiresOn && ordered.length && ordered[ordered.length - 1][1] > giftCardExpiresOn) {
+    throw new ConfigError(`${ordered[ordered.length - 1][0]} (${ordered[ordered.length - 1][1]}) must not be later than GIFT_CARD_EXPIRES_ON (${giftCardExpiresOn})`);
   }
 
-  const sentTag = str(env, 'SENT_TAG');
-  if (sentTag.includes(',')) {
-    throw new ConfigError('SENT_TAG must not contain a comma (tagsAdd would split it into several tags)');
+  const testCustomerIds = list(env, 'TEST_CUSTOMER_IDS', '').map(customerGid);
+  if (testCustomerIds.length && !/test/i.test(campaignId)) {
+    throw new ConfigError('TEST_CUSTOMER_IDS is set, so CAMPAIGN_ID must contain "test" (keeps test cards out of the real campaign)');
+  }
+
+  const timezone = str(env, 'TIMEZONE');
+  if (timezone) {
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone: timezone });
+    } catch {
+      throw new ConfigError(`TIMEZONE is not a valid IANA time zone: "${timezone}"`);
+    }
   }
 
   // Anything other than the literal string "false" keeps dry-run ON.
@@ -88,15 +187,28 @@ export function loadConfig(env = process.env, { envFile = path.join(ROOT_DIR, '.
     clientId: str(env, 'CLIENT_ID'),
     clientSecret: str(env, 'CLIENT_SECRET'),
     apiVersion,
-    segmentId,
-    segmentPageSize,
-    giftCardValue,
+    campaignId,
+    sentTag,
+    inactiveMonths: int(env, 'INACTIVE_MONTHS', 3, { min: 1, max: 36 }),
+    minAccountAgeDays: int(env, 'MIN_ACCOUNT_AGE_DAYS', 7, { min: 0, max: 3650 }),
+    requireEmailSubscribed: bool(env, 'REQUIRE_EMAIL_SUBSCRIBED', true),
+    excludeTags: list(env, 'EXCLUDE_TAGS', DEFAULT_EXCLUDE_TAGS),
+    excludeEmailDomains: list(env, 'EXCLUDE_EMAIL_DOMAINS', DEFAULT_EXCLUDE_EMAIL_DOMAINS).map((d) => d.toLowerCase()),
+    excludeOrderSources: list(env, 'EXCLUDE_ORDER_SOURCES', DEFAULT_EXCLUDE_ORDER_SOURCES).map((s) => s.toLowerCase()),
+    giftPercent,
+    giftTiersCents,
     giftCardCurrency,
     giftCardNote: str(env, 'GIFT_CARD_NOTE'),
     giftCardExpiresOn,
     giftCardTemplateSuffix: str(env, 'GIFT_CARD_TEMPLATE_SUFFIX'),
-    sentTag,
+    launchDate,
+    remind1Date,
+    remind2Date,
+    issueMaxPerRun: int(env, 'ISSUE_MAX_PER_RUN', 20000, { min: 1, max: 100000 }),
+    testCustomerIds,
+    testGiftAmountCents: dollars(env, 'TEST_GIFT_AMOUNT', '0.10', { minCents: 1, maxCents: 2000 }),
+    timezone, // empty → use the shop's ianaTimezone at select time
     dryRun,
-    progressFile: path.join(ROOT_DIR, 'progress.json'),
+    campaignsDir: str(env, 'CAMPAIGNS_DIR', path.join(ROOT_DIR, 'campaigns')),
   };
 }

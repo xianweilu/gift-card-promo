@@ -1,0 +1,32 @@
+{%- comment -%}
+  Online Store 主题里礼品卡页面要加的两段代码（客户点邮件里的按钮打开的就是这个页面）。
+
+  放在哪里：主题的 templates/gift_card.gift-card-promo.liquid。
+  只有本活动的卡（template suffix = gift-card-promo）会用这个模板，后台手工发的卡不受影响。
+  主题里还没有这个模板时：Online Store → Themes → … → Edit code → Templates → Add a new template，
+  类型选 gift_card，名字填 gift-card-promo。新模板是默认礼品卡页面的副本，再把下面两段贴进去。
+
+  改主题前建议先 Duplicate 一份主题备份。贴好后打开一张测试卡的页面检查。
+{%- endcomment -%}
+
+
+{%- comment -%}
+  第 1 段：法律要求的推广卡说明。贴在页面最上方，也就是 <header> 或礼品卡标题的上面。
+  按加州和联邦对推广礼品卡的规定，要醒目写出 PROMOTIONAL 和到期日（字号不小于 10pt）。
+{%- endcomment -%}
+{%- if gift_card.expires_on -%}
+  <p class="gift-card__promo-legal" style="font-size: 14px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; text-align: center; margin: 0 0 16px;">
+    PROMOTIONAL GIFT CARD · VALID THROUGH {{ gift_card.expires_on | date: '%B %-d, %Y' | upcase }}
+  </p>
+{%- endif -%}
+
+
+{%- comment -%}
+  第 2 段：卡用完后的提示。贴在显示金额或余额的那段下面。
+  默认页面在卡用完后只显示 $0.00，没有"已用完"的说明，加这一段告诉客户这张卡已经用过了。
+{%- endcomment -%}
+{%- if gift_card.balance == 0 -%}
+  <p class="gift-card__used" style="font-size: 16px; text-align: center; margin: 16px 0;">
+    This credit has been used. Thank you for shopping with {{ shop.name }}!
+  </p>
+{%- endif -%}
