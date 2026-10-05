@@ -50,7 +50,7 @@ test('gift cards: the campaign marker in the internal note', () => {
   assert.equal(campaignMarker('2026-10'), '[campaign:2026-10]');
   assert.equal(campaignNote('gift-card-promo', '2026-10'), 'gift-card-promo [campaign:2026-10]');
   assert.equal(campaignNote('', '2026-10'), '[campaign:2026-10]');
-  assert.equal(hasCampaignMarker('IBC2026 test [campaign:2026-10]', '2026-10'), true);
+  assert.equal(hasCampaignMarker('some note [campaign:2026-10]', '2026-10'), true);
   assert.equal(hasCampaignMarker('[campaign:2026-10-test]', '2026-10'), false, 'the test campaign is a different campaign');
   assert.equal(hasCampaignMarker(null, '2026-10'), false);
 });

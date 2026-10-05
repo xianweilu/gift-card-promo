@@ -27,7 +27,7 @@ function giftCard({ n, customer, createdAt, campaignId = '2026-10', amount = '10
   return {
     id: gid('GiftCard', n),
     createdAt,
-    note: campaignId ? `gift-card-promo [campaign:${campaignId}]` : 'IBC2026 test',
+    note: campaignId ? `gift-card-promo [campaign:${campaignId}]` : 'manual card',
     templateSuffix: 'gift-card-promo',
     enabled: true,
     lastCharacters: `x${String(n).slice(-3)}`,
