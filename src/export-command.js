@@ -84,13 +84,17 @@ export async function resolveWriteReport(writeReport) {
 }
 
 /**
- * Print what writeReport produced: the workbook path and the extra copy.
- * Its warnings are not printed here: writeReport logs each one itself when it
- * happens (result.warnings is only a copy for callers and tests).
+ * Print what writeReport produced: the Chinese workbook path, the English one
+ * (fileEn; null when that edition failed, which writeReport already warned about)
+ * and the extra copies (--out). Its warnings are not printed here: writeReport
+ * logs each one itself when it happens (result.warnings is only a copy for
+ * callers and tests).
  */
 export function logReportResult(result, log, verb = '已更新') {
   if (result?.file) log.info(`Excel ${verb}：${result.file}`);
+  if (result?.fileEn) log.info(`英文版 Excel ${verb}：${result.fileEn}`);
   if (result?.out) log.info(`另存一份：${result.out}`);
+  if (result?.outEn) log.info(`英文版另存一份：${result.outEn}`);
 }
 
 /**
@@ -167,18 +171,20 @@ export function resolveOutPath(out, paths) {
  * @param {() => Date} [options.now]
  * @param {(ms: number) => Promise<void>} [options.sleep] passed to the Shopify client (rate-limit waits)
  * @param {Function} [options.writeReport] defaults to src/report/excel.js
- * @returns {Promise<{ exitCode: number, file: string|null, out: string|null, warnings: string[] }>}
+ * @returns {Promise<{ exitCode: number, file: string|null, fileEn: string|null, out: string|null, outEn: string|null, warnings: string[] }>}
  *   exitCode 0 = exported; 1 = no list yet, the refresh failed (the workbook is
  *   still exported with the previous tag data), the --out copy could not be
  *   saved (the main workbook is still exported and its path printed) or the
- *   workbook could not be written; 2 = bad --out.
+ *   workbook could not be written; 2 = bad --out. fileEn / outEn are the English
+ *   edition and its copy (null when that edition failed: only a warning, never an
+ *   exit code).
  */
 export async function runExport({ config, refresh = false, out = null, log = console, now = () => new Date(), sleep, writeReport } = {}) {
   const paths = campaignPaths(config);
 
   if (!fs.existsSync(paths.selection)) {
     log.error(missingSelectionMessage(paths, config.campaignId));
-    return { exitCode: 1, file: null, out: null, warnings: [] };
+    return { exitCode: 1, file: null, fileEn: null, out: null, outEn: null, warnings: [] };
   }
 
   let outPath = null;
@@ -186,7 +192,7 @@ export async function runExport({ config, refresh = false, out = null, log = con
     outPath = resolveOutPath(out, paths);
   } catch (err) {
     log.error(err.message);
-    return { exitCode: 2, file: null, out: null, warnings: [] };
+    return { exitCode: 2, file: null, fileEn: null, out: null, outEn: null, warnings: [] };
   }
 
   log.info(`导出 Excel：只读本地的名单和日志${refresh ? '，先从 Shopify 只读刷新 tag' : ''}，不会改 Shopify 上的任何东西`);
@@ -213,15 +219,16 @@ export async function runExport({ config, refresh = false, out = null, log = con
     result = await write({ config, paths, log, now, out: outPath });
   } catch (err) {
     log.error(`导出 Excel 失败：${err.message}`);
-    return { exitCode: 1, file: null, out: null, warnings: [] };
+    return { exitCode: 1, file: null, fileEn: null, out: null, outEn: null, warnings: [] };
   }
   const file = result?.file ?? paths.excel;
   logReportResult({ ...result, file }, log, '已导出');
   // writeReport turns a failed --out copy into a warning (already printed) and out: null;
   // the main workbook above is fine, but the copy that was asked for does not exist.
+  // (A missing English copy is only a warning, like the English workbook itself.)
   if (outPath && !result?.out) {
     exitCode = 1;
     log.error(`没有另存到 ${outPath}（原因见上面的提示）；主 Excel 已更新：${file}`);
   }
-  return { exitCode, file, out: result?.out ?? null, warnings: result?.warnings ?? [] };
+  return { exitCode, file, fileEn: result?.fileEn ?? null, out: result?.out ?? null, outEn: result?.outEn ?? null, warnings: result?.warnings ?? [] };
 }

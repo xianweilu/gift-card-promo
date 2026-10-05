@@ -172,7 +172,7 @@ afterEach(() => {
 /** writeReport stub: records the call and what the world looked like at that moment. */
 async function writeReport(opts) {
   reports.push({ opts, lockHolder: runningCommand(opts.paths), usageWritten: fs.existsSync(opts.paths.usage) });
-  return { file: opts.paths.excel, out: null, warnings: [] };
+  return { file: opts.paths.excel, fileEn: opts.paths.excelEn, out: null, outEn: null, warnings: [] };
 }
 
 const go = (overrides = {}) => runUsage({ config: env.config, log, now: () => new Date(T.now), sleep, writeReport, ...overrides });
@@ -475,6 +475,10 @@ test('summary: daily rows by Los Angeles date, top products, by tier and by cust
   assert.match(out, /带来订单：3 笔，订单总额 \$120\.33，平均每单 \$40\.11/);
   assert.match(out, /其中礼品卡抵扣 \$56\.64，顾客另外支付 \$63\.69/);
   assert.match(out, new RegExp(`Excel：${paths.excel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  // The English edition's path follows the Chinese one.
+  const excelAt = log.lines.indexOf(`INFO Excel：${paths.excel}`);
+  assert.ok(excelAt >= 0, out);
+  assert.equal(log.lines[excelAt + 1], `INFO 英文版 Excel：${paths.excelEn}`, out);
   assert.equal(/fake-token|secret/.test(out), false, 'never logs credentials');
 });
 
@@ -733,14 +737,31 @@ test('warnings of the Excel writer are printed once: writeReport logs them, usag
   const file = path.join(paths.dir, 'x.xlsx');
   const warning = 'Excel 正打开此文件，请关闭后重新打开才能看到最新内容';
   // Like the real writer: each warning is logged when it happens and also returned.
+  const fileEn = path.join(paths.dir, 'x-en.xlsx');
   await go({
     writeReport: async (opts) => {
       opts.log.warn(warning);
-      return { file, out: null, warnings: [warning] };
+      return { file, fileEn, out: null, outEn: null, warnings: [warning] };
     },
   });
   assert.equal(log.lines.filter((l) => l === `WARN ${warning}`).length, 1, output());
   assert.match(output(), new RegExp(`Excel：${file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.ok(log.lines.includes(`INFO 英文版 Excel：${fileEn}`), output());
+});
+
+test('when the English workbook failed (fileEn null) usage prints no English path and keeps exit 0', async () => {
+  await selectionFixture(env.config, { customers: fixtureCustomers() });
+  installScenario();
+  const { exitCode } = await go({
+    writeReport: async (opts) => {
+      opts.log.warn('英文版 Excel 没有生成：disk full');
+      return { file: opts.paths.excel, fileEn: null, out: null, outEn: null, warnings: ['英文版 Excel 没有生成：disk full'] };
+    },
+  });
+  assert.equal(exitCode, 0, output());
+  assert.ok(log.lines.includes(`INFO Excel：${paths.excel}`), output());
+  assert.equal(log.lines.filter((l) => l.includes('英文版 Excel：')).length, 0, output());
+  assert.equal(log.lines.filter((l) => l === 'WARN 英文版 Excel 没有生成：disk full').length, 1, 'printed once, by writeReport');
 });
 
 test('with the real Excel writer, "Excel 正打开此文件" is printed exactly once', async () => {
@@ -752,6 +773,11 @@ test('with the real Excel writer, "Excel 正打开此文件" is printed exactly 
   assert.equal(exitCode, 0);
   assert.equal(log.lines.filter((l) => l === `WARN ${OPEN_IN_EXCEL_WARNING}`).length, 1, output());
   assert.ok(fs.existsSync(paths.excel), 'the workbook was written');
+  // The English edition is written next to it and its path printed right after the Chinese one.
+  assert.ok(fs.existsSync(paths.excelEn), `the English workbook was written:\n${output()}`);
+  const excelAt = log.lines.indexOf(`INFO Excel：${paths.excel}`);
+  assert.ok(excelAt >= 0, output());
+  assert.equal(log.lines[excelAt + 1], `INFO 英文版 Excel：${paths.excelEn}`, output());
 });
 
 test('a page that claims more orders but gives no cursor stops the run instead of silently truncating', async () => {

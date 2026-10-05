@@ -85,6 +85,19 @@ test('rules: each exclusion rule, in order, with the first failing rule as the m
   assert.equal(ns.get(cid(16)).primaryText, '7. 近 3 个月有下单：2026-09-01');
   assert.equal(ns.get(cid(11)).primaryText, '7. 近 3 个月有下单：2026-08-15');
 
+  // The reasons as data (for the English workbook), in the order of the texts, with the raw details.
+  assert.deepEqual(ns.get(cid(8)).reasons, [
+    { n: 4, code: 'too-new', detail: nodes[7].createdAt },
+    { n: 5, code: 'excluded-tag', detail: 'WHS' },
+  ]);
+  assert.deepEqual(ns.get(cid(13)).reasons, [{ n: 8, code: 'active-address', detail: cid(11) }]);
+  assert.deepEqual(ns.get(cid(14)).reasons, [{ n: 9, code: 'marketplace-order', detail: 'amazon' }]);
+  assert.deepEqual(ns.get(cid(16)).reasons, [{ n: 7, code: 'recent-order', detail: '2026-09-01T12:00:00Z' }]);
+  for (const row of s.notSelected) {
+    assert.equal(row.reasons[0].code, row.primaryCode, 'the first reason is the primary one');
+    assert.equal(row.reasons.length, row.allReasons.split('；').length, 'one reason per text segment');
+  }
+
   const count = Object.fromEntries(s.funnel.byRule.map((r) => [r.code, r.count]));
   assert.deepEqual(count, {
     'no-email': 2, 'relay-email': 3, 'not-subscribed': 1, 'too-new': 1, 'excluded-tag': 1, 'already-sent': 1,
@@ -203,6 +216,7 @@ test('rule 12: a candidate Shopify no longer has at the follow-up lookup is left
   assert.equal(row.primaryRule, 12);
   assert.equal(row.primaryText, '12. 补查订单时客户已被删除');
   assert.equal(row.allReasons, '12. 补查订单时客户已被删除');
+  assert.deepEqual(row.reasons, [{ n: 12, code: 'customer-deleted' }], 'a reason without a detail has no detail field');
   assert.equal(s.funnel.byRule.find((r) => r.code === 'customer-deleted').count, 1);
   assert.equal(s.funnel.byRule.at(-1).label, '补查订单时客户已被删除');
   assert.equal(UNLISTED_RULES.has('customer-deleted'), false, 'listed row by row in 未入选');

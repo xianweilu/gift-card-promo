@@ -22,6 +22,8 @@ const minutesBefore = (iso, m) => new Date(Date.parse(iso) - m * 60_000).toISOSt
 const minutesAfter = (iso, m) => new Date(Date.parse(iso) + m * 60_000).toISOString();
 const noSleep = async () => {};
 const tail = (id) => (id ? String(id).split('/').pop() : null);
+/** CJK and full-width characters: the English texts of verify.json must contain none. */
+const CJK = /[　-〿㐀-䶿一-鿿豈-﫿＀-￯]/;
 
 // Last-order totals → amounts with the default tiers: $150 → $15.33, $83.40 → $10.77, $350 → $19.77, $50 → $10.77.
 const TOTALS = { 1: '150.00', 2: '83.40', 3: '350.00' };
@@ -85,7 +87,7 @@ function reportStub({ fail = null, onCall = null } = {}) {
     calls.push(args);
     if (onCall) onCall(args);
     if (fail) throw new Error(fail);
-    return { file: args.paths.excel, out: null, warnings: [] };
+    return { file: args.paths.excel, fileEn: args.paths.excelEn, out: null, outEn: null, warnings: [] };
   };
   fn.calls = calls;
   return fn;
@@ -211,10 +213,14 @@ test('verify finds every issue type, fixes the journal and writes verify.json / 
   assert.deepEqual(Object.keys(report.counts), ISSUE_TYPES.map((t) => t.type));
   assert.deepEqual(report, result);
   for (const issue of report.issues) {
-    assert.deepEqual(Object.keys(issue), ['type', 'customerId', 'giftCardId', 'journal', 'shopify', 'action']);
-    for (const key of ['journal', 'shopify', 'action']) {
+    assert.deepEqual(Object.keys(issue), ['type', 'customerId', 'giftCardId', 'journal', 'shopify', 'action', 'journalEn', 'shopifyEn', 'actionEn']);
+    for (const key of ['journal', 'shopify', 'action', 'journalEn', 'shopifyEn', 'actionEn']) {
       assert.equal(typeof issue[key], 'string');
       assert.ok(issue[key].length > 0, `${issue.type}.${key} is empty`);
+    }
+    // The English texts (for the English workbook) hold no CJK or full-width characters.
+    for (const key of ['journalEn', 'shopifyEn', 'actionEn']) {
+      assert.doesNotMatch(issue[key], CJK, `${issue.type}.${key} contains Chinese: ${issue[key]}`);
     }
   }
   const byType = (type, n) => report.issues.find((i) => i.type === type && tail(i.customerId) === String(n));
@@ -236,6 +242,33 @@ test('verify finds every issue type, fixes the journal and writes verify.json / 
   assert.equal(byType('card-disabled', 6).action, '如果不是有意停用，请在后台重新启用这张卡');
   // Times in the texts are store-local (America/Los_Angeles): 16:00Z = 09:00.
   assert.match(byType('missing-in-shopify', 2).journal, /2026-10-05 09:00/);
+
+  // The same facts in English (journalEn / shopifyEn / actionEn), same times and amounts.
+  assert.equal(byType('not-in-journal', 3).actionEn, 'Recorded in the local journal from Shopify');
+  assert.equal(byType('not-in-journal', 3).shopifyEn, `Has a card from this campaign: last 4 x503, initial $19.77, created 2026-10-05 09:00 Los Angeles time; the customer does not carry ${config.sentTag} yet, the next issue run will add it`);
+  assert.equal(byType('resolved-unknown', 9).actionEn, 'Recorded in the local journal from Shopify');
+  assert.match(byType('resolved-unknown', 9).shopifyEn, /^Found the card: last 4 x509/);
+  assert.match(byType('resolved-unknown', 10).shopifyEn, /more than 10 minutes after creation started; confirmed not created/);
+  assert.match(byType('resolved-unknown', 10).actionEn, /^Set back to Pending in the local journal/);
+  assert.match(byType('resolved-unknown', 10).journalEn, /^Needs review: card creation started 2026-10-05 \d\d:\d\d Los Angeles time, outcome unknown$/);
+  assert.match(byType('still-unknown', 11).actionEn, /Run verify or issue again in about 8 minutes/);
+  assert.match(byType('still-unknown', 11).journalEn, /^In progress: card creation started /);
+  assert.match(byType('missing-in-shopify', 2).shopifyEn, /search index/);
+  assert.equal(byType('missing-in-shopify', 2).journalEn, 'Journal has this card: last 4 x502, created 2026-10-05 09:00 Los Angeles time');
+  assert.equal(byType('missing-in-shopify', 2).actionEn, 'Run verify again in a few minutes; if still missing, look up the gift card by id in the admin');
+  assert.equal(byType('duplicate-cards', 4).actionEn, 'Disable this extra card in the admin after checking (keep the one ending x504)');
+  assert.match(byType('duplicate-cards', 4).shopifyEn, /^This customer has 2 cards from this campaign; this one is extra: last 4 x514/);
+  assert.equal(byType('amount-mismatch', 5).journalEn, 'List amount $10.77');
+  assert.match(byType('amount-mismatch', 5).shopifyEn, /^Card initial amount \$15\.33, last 4 x505$/);
+  assert.match(byType('tag-missing', 7).shopifyEn, new RegExp(`^Customer does not carry ${config.sentTag} `));
+  assert.match(byType('tag-missing', 7).journalEn, /^Journal says tagged 2026-10-05 09:00 Los Angeles time$/);
+  assert.match(byType('tag-without-card', 8).shopifyEn, /but has no card from this campaign$/);
+  assert.match(byType('not-in-selection', 60).shopifyEn, /is not on the recipient list$/);
+  assert.equal(byType('card-disabled', 6).shopifyEn, 'This card is disabled: last 4 x506, initial $10.77, created 2026-10-05 09:00 Los Angeles time');
+  assert.equal(byType('card-disabled', 6).actionEn, 'If it was not disabled on purpose, re-enable the card in the admin');
+  // Journal states in English: a done row, an empty journal.
+  assert.match(byType('duplicate-cards', 4).journalEn, /^The journal holds the one ending x504$/);
+  assert.equal(byType('not-in-journal', 3).journalEn, 'No journal record for this customer');
 
   // tags.json: everyone carrying the tag in Shopify, sorted.
   assert.deepEqual(readJson(paths.tags), {
@@ -586,6 +619,106 @@ test('a card for a customer without any account link, and a mismatched currency,
   assert.equal(issues[1].journal, '日志里没有这张卡');
   assert.equal(fixes.length, 1);
   assert.equal(counts['not-in-selection'], 1);
+  // English twins of the same rows.
+  assert.equal(issues[0].journalEn, 'List amount $10.77 USD');
+  assert.equal(issues[0].shopifyEn, 'Card initial amount $10.77 CAD, currency differs, last 4 x001');
+  assert.equal(issues[1].shopifyEn, 'This card carries the campaign marker but has no customer: last 4 x001, initial $10.77, created 2026-10-05 09:00 Los Angeles time');
+  assert.equal(issues[1].journalEn, 'No journal record for this card');
+  assert.equal(issues[1].actionEn, 'Check how this card was created; disable it in the admin if it should not have been issued');
+  for (const issue of issues) for (const key of ['journalEn', 'shopifyEn', 'actionEn']) assert.doesNotMatch(issue[key], CJK, `${issue.type}.${key}: ${issue[key]}`);
+});
+
+test('analyzeVerify: every English text variant (journal states, durations, extra cards, no-new-cards) is ASCII-only', () => {
+  const C = (n) => gid('Customer', n);
+  const G = (n) => gid('GiftCard', n);
+  const selection = {
+    mode: 'live',
+    params: { currency: 'USD' },
+    recipients: Array.from({ length: 9 }, (_, i) => ({ seq: i + 1, customerId: C(i + 1), amountCents: 1077 })),
+  };
+  const started = '2026-10-05T16:00:00.000Z'; // 09:00 Los Angeles
+  const cardBase = { createdAt: started, enabled: true, amountCents: 1077, balanceCents: 1077, currencyCode: 'USD' };
+  const state = {
+    customers: new Map([
+      // c1: pending after attempts, Shopify has a card → not-in-journal, "Pending: tried 2 times before"
+      [C(1), { status: STATUS.PENDING, attempts: 2, giftCardId: null, taggedAt: null }],
+      // c2: failed with our own English error, carries the tag in Shopify, no card → tag-without-card
+      [C(2), { status: STATUS.FAILED, error: 'Network error calling Shopify: fetch failed', giftCardId: null, taggedAt: null }],
+      // c3: skipped (reason code), carries the tag, no card → tag-without-card with a skip label
+      [C(3), { status: STATUS.SKIPPED, skipReason: 'relay-email', giftCardId: null, taggedAt: null }],
+      // c4: created (not tagged); journal card hidden, Shopify shows another → duplicate (journal keeper missing) + missing-in-shopify
+      [C(4), { status: STATUS.CREATED, giftCardId: G(41), last4: 'x041', createdAt: started, taggedAt: null }],
+      // c5: done but the tag is gone in Shopify → tag-missing; a used extra card and a disabled extra card
+      [C(5), { status: STATUS.DONE, giftCardId: G(51), last4: 'x051', createdAt: started, taggedAt: started }],
+      // c6: unknown, settled on/after REMIND_1_DATE → "no new cards" action
+      [C(6), { status: STATUS.UNKNOWN, startedAt: started, giftCardId: null, taggedAt: null, attempts: 1 }],
+      // c7: in progress 90 seconds ago → still-unknown "in about 9 minutes" (seconds rounded up)
+      [C(7), { status: STATUS.IN_PROGRESS, startedAt: '2026-10-12T16:58:30.000Z', giftCardId: null, taggedAt: null }],
+      // c8: skipped with an unknown reason code
+      [C(8), { status: STATUS.SKIPPED, skipReason: 'something-new', giftCardId: null, taggedAt: null }],
+    ]),
+  };
+  const cards = [
+    { ...cardBase, id: G(11), customerId: C(1), last4: 'x011' },
+    { ...cardBase, id: G(42), customerId: C(4), last4: 'x042', createdAt: '2026-10-05T16:10:00.000Z' },
+    { ...cardBase, id: G(51), customerId: C(5), last4: 'x051' },
+    { ...cardBase, id: G(52), customerId: C(5), last4: 'x052', balanceCents: 500, createdAt: '2026-10-05T16:10:00.000Z' },
+    { ...cardBase, id: G(53), customerId: C(5), last4: 'x053', enabled: false, createdAt: '2026-10-05T16:20:00.000Z' },
+    // c8's card is disabled and is the only one → "re-enable" action
+    { ...cardBase, id: G(81), customerId: C(8), last4: 'x081', enabled: false },
+  ];
+  const { issues } = analyzeVerify({
+    selection,
+    state,
+    cards,
+    taggedIds: new Set([C(2), C(3)]),
+    nowMs: Date.parse('2026-10-12T17:00:00.000Z'), // 10/12 10:00 Los Angeles, REMIND_1_DATE reached
+    tag: 'OCT26RTPROMO',
+    timezone: 'America/Los_Angeles',
+    remind1Date: '2026-10-12',
+  });
+
+  const find = (type, n, cardN = undefined) => {
+    const hit = issues.find((i) => i.type === type && tail(i.customerId) === String(n) && (cardN === undefined || tail(i.giftCardId) === String(cardN)));
+    assert.ok(hit, `${type} for customer ${n} (card ${cardN ?? 'any'}) in ${JSON.stringify(issues.map((i) => [i.type, tail(i.customerId), tail(i.giftCardId)]))}`);
+    return hit;
+  };
+  assert.equal(find('not-in-journal', 1).journalEn, 'Pending: tried 2 times before, confirmed not created');
+  assert.equal(find('not-in-journal', 1).shopifyEn, 'Has a card from this campaign: last 4 x011, initial $10.77, created 2026-10-05 09:00 Los Angeles time; the customer does not carry OCT26RTPROMO yet, the next issue run will add it');
+  assert.equal(find('tag-without-card', 2).journalEn, 'Failed: Network error calling Shopify: fetch failed');
+  assert.equal(find('tag-missing', 5).journalEn, 'Journal says tagged 2026-10-05 09:00 Los Angeles time');
+  assert.equal(find('tag-missing', 5).shopifyEn, 'Customer does not carry OCT26RTPROMO (a new tag may not be in the search index yet)');
+  assert.equal(find('tag-missing', 5).actionEn, 'Run verify again in a few minutes; if still missing, add OCT26RTPROMO to the customer in the admin');
+  assert.equal(find('tag-without-card', 3).journalEn, 'Skipped before issuing: email domain is on the exclusion list');
+  assert.equal(find('tag-without-card', 3).shopifyEn, 'Customer carries OCT26RTPROMO but has no card from this campaign');
+  assert.equal(find('tag-without-card', 3).actionEn, 'Check who added the tag: with this tag, issue skips this customer');
+  assert.equal(find('duplicate-cards', 4, 42).journalEn, 'The journal holds the one ending x041 (not found in Shopify this time)');
+  assert.equal(find('missing-in-shopify', 4).journalEn, 'Journal has this card: last 4 x041, created 2026-10-05 09:00 Los Angeles time');
+  assert.equal(find('missing-in-shopify', 4).shopifyEn, 'Card not found (a new card may not be in the search index yet, or its note was changed)');
+  assert.equal(find('duplicate-cards', 5, 52).journalEn, 'The journal holds the one ending x051');
+  assert.equal(find('duplicate-cards', 5, 52).shopifyEn, 'This customer has 3 cards from this campaign; this one is extra: last 4 x052, initial $10.77, balance $5.00, created 2026-10-05 09:10 Los Angeles time');
+  assert.equal(find('duplicate-cards', 5, 52).actionEn, 'This extra card has already been used; decide manually how to handle it');
+  assert.equal(find('duplicate-cards', 5, 53).shopifyEn, 'This customer has 3 cards from this campaign; this one is extra: last 4 x053, initial $10.77, created 2026-10-05 09:20 Los Angeles time, disabled');
+  assert.equal(find('duplicate-cards', 5, 53).actionEn, 'Already disabled, nothing to do');
+  assert.equal(find('card-disabled', 5, 53).journalEn, 'Done: last 4 x051, tagged 2026-10-05 09:00 Los Angeles time');
+  assert.equal(find('card-disabled', 5, 53).shopifyEn, 'This card is disabled: last 4 x053, initial $10.77, created 2026-10-05 09:20 Los Angeles time');
+  assert.equal(find('card-disabled', 5, 53).actionEn, 'This is an extra card and already disabled, nothing to do');
+  assert.equal(find('resolved-unknown', 6).journalEn, 'Needs review: card creation started 2026-10-05 09:00 Los Angeles time, outcome unknown');
+  assert.equal(find('resolved-unknown', 6).shopifyEn, 'Card still not found more than 10 minutes after creation started; confirmed not created');
+  assert.equal(find('resolved-unknown', 6).actionEn, 'Set back to Pending in the local journal; for the live campaign issue creates no new cards from REMIND_1_DATE (2026-10-12) on. To issue it anyway, move the reminder date first and re-paste the templates');
+  assert.equal(find('resolved-unknown', 6).action, '已在本地日志改回待发放；正式活动从 REMIND_1_DATE（2026-10-12）起 issue 不再建新卡，确需补发请先改提醒日期并重贴模板', 'the Chinese text is unchanged');
+  assert.equal(find('still-unknown', 7).journalEn, 'In progress: card creation started 2026-10-12 09:58 Los Angeles time, no result recorded');
+  assert.equal(find('still-unknown', 7).shopifyEn, 'Card not found yet (a new card may not be in the search index yet)');
+  assert.equal(find('still-unknown', 7).actionEn, 'Run verify or issue again in about 9 minutes to check');
+  assert.equal(find('card-disabled', 8).journalEn, 'Skipped before issuing: something-new');
+  assert.equal(find('card-disabled', 8).actionEn, 'If it was not disabled on purpose, re-enable the card in the admin');
+  for (const issue of issues) {
+    for (const key of ['journalEn', 'shopifyEn', 'actionEn']) {
+      assert.equal(typeof issue[key], 'string');
+      assert.ok(issue[key].length > 0, `${issue.type}.${key} is empty`);
+      assert.doesNotMatch(issue[key], CJK, `${issue.type}.${key}: ${issue[key]}`);
+    }
+  }
 });
 
 test('a tagged customer gets no "not tagged" note; an unknown row without a start time is never settled automatically', () => {
@@ -757,7 +890,7 @@ test('Excel warnings are printed once: writeReport logs them, verify does not re
   // Like the real writer: logged when it happens, and returned.
   const writeReport = async (args) => {
     args.log.warn(warning);
-    return { file: args.paths.excel, out: null, warnings: [warning] };
+    return { file: args.paths.excel, fileEn: args.paths.excelEn, out: null, outEn: null, warnings: [warning] };
   };
 
   const { exitCode } = await runVerify({ config, log, now: at(RUN_AT), sleep: noSleep, writeReport });
@@ -765,6 +898,31 @@ test('Excel warnings are printed once: writeReport logs them, verify does not re
   assert.equal(exitCode, 0, log.lines.join('\n'));
   assert.equal(log.lines.filter((l) => l === `WARN ${warning}`).length, 1, log.lines.join('\n'));
   assert.ok(log.lines.includes(`INFO Excel 已更新：${paths.excel}`), log.lines.join('\n'));
+  // The English edition's path follows the Chinese one.
+  const zhAt = log.lines.indexOf(`INFO Excel 已更新：${paths.excel}`);
+  assert.equal(log.lines[zhAt + 1], `INFO 英文版 Excel 已更新：${paths.excelEn}`, log.lines.join('\n'));
+});
+
+test('when the English workbook failed (fileEn null) no English path is printed and the exit code is unchanged', async () => {
+  env = testConfig();
+  const { config } = env;
+  const paths = campaignPaths(config);
+  const list = customers(1);
+  await selectionFixture(config, { customers: list });
+  fake = installFakeShopify({ customers: list });
+  const log = memoryLog();
+  // Like the real writer: the English failure was already logged as a warning, fileEn is null.
+  const writeReport = async (args) => {
+    args.log.warn('英文版 Excel 没有生成：disk full');
+    return { file: args.paths.excel, fileEn: null, out: null, outEn: null, warnings: ['英文版 Excel 没有生成：disk full'] };
+  };
+
+  const { exitCode } = await runVerify({ config, log, now: at(RUN_AT), sleep: noSleep, writeReport });
+
+  assert.equal(exitCode, 0, log.lines.join('\n'));
+  assert.ok(log.lines.includes(`INFO Excel 已更新：${paths.excel}`), log.lines.join('\n'));
+  assert.equal(log.lines.filter((l) => l.includes('英文版 Excel 已更新')).length, 0, log.lines.join('\n'));
+  assert.equal(log.lines.filter((l) => l === 'WARN 英文版 Excel 没有生成：disk full').length, 1, 'printed once, by writeReport');
 });
 
 test('with the real Excel writer, "Excel 正打开此文件" is printed exactly once', async () => {
@@ -783,6 +941,11 @@ test('with the real Excel writer, "Excel 正打开此文件" is printed exactly 
   assert.equal(exitCode, 0, log.lines.join('\n'));
   assert.ok(fs.existsSync(paths.excel), `the workbook was written:\n${log.lines.join('\n')}`);
   assert.equal(log.lines.filter((l) => l === `WARN ${OPEN_IN_EXCEL_WARNING}`).length, 1, log.lines.join('\n'));
+  // The English edition is written next to it and its path printed right after the Chinese one.
+  assert.ok(fs.existsSync(paths.excelEn), `the English workbook was written:\n${log.lines.join('\n')}`);
+  const zhAt = log.lines.indexOf(`INFO Excel 已更新：${paths.excel}`);
+  assert.ok(zhAt >= 0, log.lines.join('\n'));
+  assert.equal(log.lines[zhAt + 1], `INFO 英文版 Excel 已更新：${paths.excelEn}`, log.lines.join('\n'));
 });
 
 test('a changed SENT_TAG since select is pointed out', async () => {

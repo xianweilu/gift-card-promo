@@ -109,7 +109,7 @@ function setup({ env = {}, customers = CUSTOMERS, orders = ACTIVE_ORDERS, orderH
   const reports = [];
   const writeReport = async (args) => {
     reports.push({ ...args, runLockHeld: fs.existsSync(paths.runLock), selectionExists: fs.existsSync(paths.selection) });
-    return { file: args.paths.excel, out: null, warnings: [] };
+    return { file: args.paths.excel, fileEn: args.paths.excelEn, out: null, outEn: null, warnings: [] };
   };
   const run = (options = {}) => runSelect({ config: cfg.config, log, now: at(NOW_MS), sleep: noSleep, writeReport, bulkPollMs: 1_000, ...options });
   return { config: cfg.config, fake, log, paths, reports, run };
@@ -240,6 +240,10 @@ test('bulk export: selection.json has the expected recipients; journal, snapshot
   assert.ok(hasLine(t.log, '本次新导出'));
   assert.ok(hasLine(t.log, `名单文件：${t.paths.selection}`));
   assert.ok(hasLine(t.log, `Excel：${t.paths.excel}`));
+  // The English edition's path follows the Chinese one.
+  const excelAt = t.log.lines.findIndex((l) => l.endsWith(`  Excel：${t.paths.excel}`));
+  assert.ok(excelAt >= 0, t.log.lines.join('\n'));
+  assert.equal(t.log.lines[excelAt + 1], `INFO   英文版 Excel：${t.paths.excelEn}`, t.log.lines.join('\n'));
   assert.deepEqual(linesOf(t.log, 'ERROR'), []);
   assert.deepEqual(linesOf(t.log, 'WARN'), []);
 });

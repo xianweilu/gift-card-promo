@@ -25,7 +25,8 @@ export function campaignPaths(config) {
     previewDir: path.join(dir, 'preview'), // rendered email previews
     runLock: path.join(dir, 'run.lock'),
     excelLock: path.join(dir, 'excel.lock'),
-    excel: path.join(dir, `gift-card-promo-${config.campaignId}.xlsx`),
+    excel: path.join(dir, `gift-card-promo-${config.campaignId}.xlsx`), // Chinese edition
+    excelEn: path.join(dir, `gift-card-promo-${config.campaignId}-en.xlsx`), // English edition, same content
   };
 }
 

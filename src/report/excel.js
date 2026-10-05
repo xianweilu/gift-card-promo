@@ -1,7 +1,9 @@
-// Builds the campaign workbook (campaigns/<id>/gift-card-promo-<id>.xlsx) from
-// local state only: selection.json + journal.jsonl, plus tags.json, verify.json
-// and usage.json when they exist. The program never reads the workbook back;
-// every command simply regenerates it.
+// Builds the campaign workbooks from local state only: selection.json +
+// journal.jsonl, plus tags.json, verify.json and usage.json when they exist.
+// Two editions with the same content and layout:
+//   campaigns/<id>/gift-card-promo-<id>.xlsx      Chinese (TEXT.zh of ./text.js)
+//   campaigns/<id>/gift-card-promo-<id>-en.xlsx   English (TEXT.en)
+// The program never reads a workbook back; every command simply regenerates them.
 //
 // Design notes
 // - Streaming (ExcelJS WorkbookWriter): each row is styled, committed and
@@ -11,9 +13,12 @@
 //   (selection.params.timezone), i.e. Dates whose UTC fields are the local time.
 // - Links are HYPERLINK() formulas, because Excel caps real hyperlinks at ~65k
 //   per sheet.
-// - The file is written to a temp file in the same directory and renamed over
+// - Each file is written to a temp file in the same directory and renamed over
 //   the target while holding the Excel lock, so nobody sees half a file and a
 //   later writer always includes the newest journal entries.
+// - Every visible text comes from the active text pack (ctx.T, ctx.lang); the
+//   data is read and computed once (buildContext) and shown by both editions
+//   (localize). Console messages stay Chinese (CONSOLE).
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -22,30 +27,14 @@ import ExcelJS from 'exceljs';
 
 import { readJson, readJournal, foldJournal, runningCommand, withExcelLock, ensureDir } from '../campaign.js';
 import { campaignNote } from '../giftcards.js';
-import { formatUsd, tierLabel, describeTiers } from '../select/amount.js';
-import { channelLabel, UNLISTED_RULES } from '../select/rules.js';
+import { formatUsd, tierLabel } from '../select/amount.js';
+import { UNLISTED_RULES } from '../select/rules.js';
+import { TEXT, textFor, CONSOLE } from './text.js';
 import {
-  STATUS_LABELS,
   STATUS_ORDER,
   STATUS_FILLS,
-  STATUS_HELP,
-  ISSUE_SKIP_LABELS,
-  REMIND_SKIP_LABELS,
-  REMIND_HELP,
-  REMIND_SENT_BY_TAG,
-  REMIND_TAG_MISSING_SUFFIX,
-  KIND_LABELS,
-  MARKETING_LABELS,
-  BASIS_NOTES,
-  NEVER_NOTES,
-  OP_LABELS,
-  RECONCILE_SOURCE_LABELS,
-  VERIFY_TYPE_LABELS,
-  SNAPSHOT_SOURCE_LABELS,
-  UNMATCHED_REASON_LABELS,
-  EXIT_CODE_HELP,
-  USAGE_SPLIT_NOTE,
   labelOf,
+  storedLabelOf,
   issueSkipText,
   remindSkipText,
   noteText,
@@ -56,8 +45,9 @@ import {
 } from './labels.js';
 
 export const DEFAULT_TIMEZONE = 'America/Los_Angeles';
-export const OPEN_IN_EXCEL_WARNING = 'Excel 正打开此文件，请关闭后重新打开才能看到最新内容';
-const NO_SELECTION_MESSAGE = '还没有名单，请先运行 select';
+export const OPEN_IN_EXCEL_WARNING = CONSOLE.openInExcel;
+/** The same warning about the English workbook (gift-card-promo-<id>-en.xlsx). */
+export const OPEN_IN_EXCEL_WARNING_EN = CONSOLE.openInExcelEn;
 
 const DAY_MS = 86_400_000;
 // A tags.json snapshot overrides a journal tag.ok only when taken this long after it
@@ -82,10 +72,10 @@ export function effectiveStatus(status, running) {
   return s === 'in_progress' && running !== 'issue' ? 'unknown' : s;
 }
 
-/** Chinese label of an issue status, e.g. "已完成"; see effectiveStatus for in_progress. */
-export function statusLabel(status, running) {
+/** Label of an issue status, e.g. "已完成" ('zh', the default) or the English one; see effectiveStatus for in_progress. */
+export function statusLabel(status, running, lang = 'zh') {
   const s = effectiveStatus(status, running);
-  return STATUS_LABELS[s] ?? String(s);
+  return textFor(lang).STATUS_LABELS[s] ?? String(s);
 }
 
 /** Reminder status as shown: a stale in_progress (remind not running) is unknown. */
@@ -95,33 +85,36 @@ export function effectiveRemindStatus(status, running) {
 
 /**
  * Text of a "第 N 次提醒" cell for one reminder state from foldJournal
- * ({ status, at, reason, error, source, tagError, ... } or undefined), times in store-local `tz`.
+ * ({ status, at, reason, error, source, tagError, ... } or undefined), times in store-local `tz`,
+ * in `lang` ('zh' | 'en' | a text pack).
  * A sent state with source 'tag' was found by its round tag in Shopify (remind.found: the
  * journal had no send, so there is no time); a tagError means the round tag is still missing.
  */
-export function remindLabel(reminder, running, tz = DEFAULT_TIMEZONE) {
+export function remindLabel(reminder, running, tz = DEFAULT_TIMEZONE, lang = 'zh') {
   if (!reminder || !reminder.status) return '';
+  const T = textFor(lang);
+  const R = T.recipients.remind;
   switch (effectiveRemindStatus(reminder.status, running)) {
     case 'sent': {
       let text;
       if (reminder.source === 'tag') {
-        text = REMIND_SENT_BY_TAG;
+        text = T.REMIND_SENT_BY_TAG;
       } else {
         const at = clockFor(tz).stamp(reminder.at);
-        text = at ? `已发 ${at.slice(5)}` : '已发';
+        text = at ? R.sentAt(at.slice(5)) : R.sent;
       }
-      return reminder.tagError !== undefined && reminder.tagError !== null ? `${text}${REMIND_TAG_MISSING_SUFFIX}` : text;
+      return reminder.tagError !== undefined && reminder.tagError !== null ? `${text}${T.REMIND_TAG_MISSING_SUFFIX}` : text;
     }
     case 'skipped':
-      return reminder.reason ? `跳过：${labelOf(REMIND_SKIP_LABELS, reminder.reason)}` : '跳过';
+      return reminder.reason ? R.skippedFor(labelOf(T.REMIND_SKIP_LABELS, reminder.reason)) : R.skipped;
     case 'failed': {
-      const error = errorText(reminder.error);
-      return error ? `失败：${error}` : '失败';
+      const error = errorText(reminder.error, T);
+      return error ? R.failedWith(error) : R.failed;
     }
     case 'unknown':
-      return '结果不明';
+      return R.unknown;
     case 'in_progress':
-      return '进行中';
+      return R.inProgress;
     default:
       return String(reminder.status);
   }
@@ -158,6 +151,14 @@ export function adminUrl(shop, type, gid) {
   const segment = ADMIN_SEGMENTS[key(type)] ?? ADMIN_SEGMENTS[key(gidType)];
   if (!segment) return '';
   return `https://admin.shopify.com/store/${encodeURIComponent(shop)}/${segment}/${id}`;
+}
+
+/**
+ * The English edition's file next to a workbook file: "<name>.xlsx" → "<name>-en.xlsx"
+ * (a name without ".xlsx" gets "-en" at the end). campaignPaths().excelEn is this of .excel.
+ */
+export function englishWorkbookPath(file) {
+  return path.join(path.dirname(file), path.basename(file).replace(/(\.xlsx)?$/i, (ext) => `-en${ext}`));
 }
 
 // ---------------------------------------------------------------------------
@@ -270,8 +271,8 @@ function validTimeZone(tz) {
   }
 }
 
-function timeZoneLabel(tz) {
-  return tz === DEFAULT_TIMEZONE ? '洛杉矶时间' : `${tz} 时间`;
+function timeZoneLabel(tz, T) {
+  return tz === DEFAULT_TIMEZONE ? T.timeZone.default : T.timeZone.other(tz);
 }
 
 // ---------------------------------------------------------------------------
@@ -296,10 +297,10 @@ function txt(v) {
 // control characters itself, but writes these through, and a single one makes
 // the whole sheet part malformed (Excel then "repairs" the file and usually
 // loses that sheet's cells). Customer names, tags and product titles are free text.
-const XML_SUSPECT = /[\uD800-\uDFFF\uFFFE\uFFFF]/;
-const XML_NONCHARACTERS = /[\uFFFE\uFFFF]/g;
+const XML_SUSPECT = /[\uD800-\uDFFF￾￿]/;
+const XML_NONCHARACTERS = /[￾￿]/g;
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
-const wellFormed = typeof String.prototype.toWellFormed === 'function' ? (s) => s.toWellFormed() : (s) => s.replace(LONE_SURROGATE, '\uFFFD');
+const wellFormed = typeof String.prototype.toWellFormed === 'function' ? (s) => s.toWellFormed() : (s) => s.replace(LONE_SURROGATE, '�');
 
 /** `s` safe for XML: unpaired surrogates → U+FFFD, U+FFFE/U+FFFF removed. */
 function xmlSafe(s) {
@@ -357,8 +358,8 @@ const MAX_FORMULA_TEXT = 255;
 
 // ---------------------------------------------------------------------------
 // Styles. Every cell gets one of a few shared style objects: ExcelJS caches
-// the style id per object, so sharing them keeps 1M+ cells fast. Never mutate
-// a style object after creation (cells point at them).
+// the style id per object (per workbook), so sharing them keeps 1M+ cells fast.
+// Never mutate a style object after creation (cells point at them).
 // ---------------------------------------------------------------------------
 
 const COLOR = {
@@ -494,9 +495,12 @@ function protectionBeforeFilter(ws) {
 }
 
 class Book {
-  constructor(file, { generatedAt, warnings, log }) {
-    this.warnings = warnings;
-    this.log = log;
+  /**
+   * @param {string} file the (temp) file to write
+   * @param {{ generatedAt: Date, warn: (message: string) => void }} options `warn` logs and collects a warning
+   */
+  constructor(file, { generatedAt, warn }) {
+    this.warn = warn;
     this.error = null;
     this.wb = new ExcelJS.stream.xlsx.WorkbookWriter({
       filename: file,
@@ -526,11 +530,6 @@ class Book {
   sheet(name, options) {
     this.check();
     return new Sheet(this, name, options);
-  }
-
-  warn(message) {
-    this.warnings.push(message);
-    this.log.warn(message);
   }
 
   async commit() {
@@ -633,7 +632,7 @@ class Sheet {
     await this.ws.protect('', { selectLockedCells: true, selectUnlockedCells: true, autoFilter: true, formatColumns: true });
     protectionBeforeFilter(this.ws);
     this.ws.commit();
-    if (this.truncated) this.book.warn(`“${this.name}”超过 Excel 的行数上限（${EXCEL_MAX_ROWS.toLocaleString('en-US')} 行），后面的行没有写入`);
+    if (this.truncated) this.book.warn(CONSOLE.rowLimit(this.name, EXCEL_MAX_ROWS.toLocaleString('en-US')));
     this.book.check();
   }
 }
@@ -643,38 +642,52 @@ class Sheet {
 // ---------------------------------------------------------------------------
 
 /**
- * Rebuild the campaign workbook from selection.json + journal.jsonl (+ tags.json,
- * verify.json, usage.json when present). Holds the Excel lock while reading
- * the state and replacing the file, so concurrent calls never interleave.
+ * Rebuild both campaign workbooks from selection.json + journal.jsonl (+ tags.json,
+ * verify.json, usage.json when present): the Chinese one (paths.excel) and the English
+ * one (paths.excelEn), with the same content. Holds the Excel lock while reading the
+ * state and replacing the files, so concurrent calls never interleave.
+ *
+ * The Chinese workbook is written first, exactly as before: if it fails, writeReport
+ * rejects. A failure of the English workbook is only a warning
+ * ("英文版 Excel 没有生成：<reason>") with fileEn null; the previous English file, if
+ * any, is left as it was.
  *
  * @param {object} a
  * @param {object} a.config loadConfig() result
- * @param {object} a.paths campaignPaths(config)
+ * @param {object} a.paths campaignPaths(config) (paths.excelEn defaults to englishWorkbookPath(paths.excel))
  * @param {{info: Function, warn: Function, error: Function}} [a.log]
- * @param {() => Date} [a.now] "generated at" time shown in the workbook
- * @param {string|null} [a.out] also save a copy here (a file, or a directory to put it in)
+ * @param {() => Date} [a.now] "generated at" time shown in the workbooks
+ * @param {string|null} [a.out] also save a copy here (a file, or a directory to put it in);
+ *   the English workbook is copied next to it as "<name>-en.xlsx"
  * @param {object} [a.lockOptions] passed to withExcelLock ({ timeoutMs, pollMs, sleep }); for tests
- * @returns {Promise<{ file: string, out: string|null, warnings: string[] }>}
+ * @param {{ zh?: object, en?: object }} [a.packs] text packs to use instead of TEXT.zh / TEXT.en; for tests
+ * @returns {Promise<{ file: string, fileEn: string|null, out: string|null, outEn: string|null, warnings: string[] }>}
+ *   every warning is logged once by writeReport itself; `warnings` is a copy for callers and tests
  */
-export async function writeReport({ config, paths, log = console, now = () => new Date(), out = null, lockOptions = {} } = {}) {
+export async function writeReport({ config, paths, log = console, now = () => new Date(), out = null, lockOptions = {}, packs = null } = {}) {
   if (!config || !paths) throw new Error('writeReport needs config and paths');
-  return withExcelLock(paths, () => buildAndPublish({ config, paths, log, now, out }), lockOptions);
+  const zh = packs?.zh ?? TEXT.zh;
+  const en = packs?.en ?? TEXT.en;
+  return withExcelLock(paths, () => buildAndPublish({ config, paths, log, now, out, zh, en }), lockOptions);
 }
 
-async function buildAndPublish({ config, paths, log, now, out }) {
+async function buildAndPublish({ config, paths, log, now, out, zh, en }) {
   // Every warning is logged here, once, and also returned (callers must not print them again).
   const warnings = [];
   const warn = (message) => {
     warnings.push(message);
     log.warn(message);
   };
+  const excelEn = paths.excelEn ?? englishWorkbookPath(paths.excel);
 
-  // We hold the Excel lock, so no other writer of this workbook is running:
+  // We hold the Excel lock, so no other writer of these workbooks is running:
   // any temp workbook still in the folder was left by a killed write.
   removeLeftoverTemps(paths.excel);
+  removeLeftoverTemps(excelEn);
 
+  // Read once: both editions show the same state.
   const selection = readJson(paths.selection, null);
-  if (!selection) throw new Error(NO_SELECTION_MESSAGE);
+  if (!selection) throw new Error(CONSOLE.noSelection);
   const entries = readJournal(paths.journal);
   const journal = foldJournal(entries);
   const tags = readOptionalJson(paths.tags, 'tags.json', warn);
@@ -683,35 +696,64 @@ async function buildAndPublish({ config, paths, log, now, out }) {
   const running = runningCommand(paths);
   const generatedAt = toDate(now());
 
-  const ctx = buildContext({ config, selection, entries, journal, tags, verify, usage, running, generatedAt, warn });
+  const base = buildContext({ config, selection, entries, journal, tags, verify, usage, running, generatedAt, warn });
 
   ensureDir(path.dirname(paths.excel));
-  const tmp = tempPathFor(paths.excel);
-  const book = new Book(tmp, { generatedAt, warnings, log });
+  await writeWorkbook(paths.excel, localize(base, zh), { generatedAt, warn });
+
+  let fileEn = null;
+  try {
+    ensureDir(path.dirname(excelEn));
+    await writeWorkbook(excelEn, localize(base, en), { generatedAt, warn: (message) => warn(`${CONSOLE.englishPrefix}${message}`) });
+    fileEn = excelEn;
+  } catch (err) {
+    warn(CONSOLE.englishFailed(err?.message ?? String(err)));
+  }
+
+  // The main workbooks are in place now: a failed extra copy must not look like a failed export.
+  let outFile = null;
+  let outEn = null;
+  if (out) {
+    let target = null;
+    try {
+      target = resolveOut(out, paths.excel);
+      outFile = copyOut(paths.excel, target, { other: excelEn, failed: CONSOLE.copyFailed });
+    } catch (err) {
+      warn(err.message);
+    }
+    // The English copy goes next to the Chinese one ("<name>-en.xlsx"); a target that is the
+    // English workbook itself was refused above and gets no "-en-en" copy.
+    if (fileEn && target && target !== path.resolve(excelEn)) {
+      try {
+        outEn = copyOut(fileEn, englishWorkbookPath(target), { other: paths.excel, failed: CONSOLE.copyFailedEn });
+      } catch (err) {
+        warn(err.message);
+      }
+    }
+  }
+
+  for (const file of new Set([paths.excel, outFile].filter(Boolean))) {
+    if (openInExcel(file)) warn(file === paths.excel ? OPEN_IN_EXCEL_WARNING : CONSOLE.openInExcelAt(file));
+  }
+  for (const file of new Set([fileEn, outEn].filter(Boolean))) {
+    if (openInExcel(file)) warn(file === fileEn ? OPEN_IN_EXCEL_WARNING_EN : CONSOLE.openInExcelEnAt(file));
+  }
+  return { file: paths.excel, fileEn, out: outFile, outEn, warnings };
+}
+
+/** Write one edition: a temp file in the target's folder, renamed over `file` when complete. */
+async function writeWorkbook(file, ctx, { generatedAt, warn }) {
+  const tmp = tempPathFor(file);
+  const book = new Book(tmp, { generatedAt, warn });
   try {
     await writeSheets(book, ctx);
     await book.commit();
-    replaceFile(tmp, paths.excel);
+    replaceFile(tmp, file);
   } catch (err) {
     book.discard();
     removeQuietly(tmp);
     throw err;
   }
-
-  // The main workbook is in place now: a failed extra copy must not look like a failed export.
-  let outFile = null;
-  if (out) {
-    try {
-      outFile = copyOut(paths.excel, out);
-    } catch (err) {
-      warn(err.message);
-    }
-  }
-
-  for (const file of new Set([paths.excel, outFile].filter(Boolean))) {
-    if (openInExcel(file)) warn(file === paths.excel ? OPEN_IN_EXCEL_WARNING : `${OPEN_IN_EXCEL_WARNING}：${file}`);
-  }
-  return { file: paths.excel, out: outFile, warnings };
 }
 
 /**
@@ -757,7 +799,7 @@ function readOptionalJson(file, label, warn) {
     const value = readJson(file, null);
     return value && typeof value === 'object' ? value : null;
   } catch (err) {
-    warn(`${label} 无法读取，本次 Excel 不包含它的内容：${err.message}`);
+    warn(CONSOLE.unreadable(label, err.message));
     return null;
   }
 }
@@ -767,7 +809,7 @@ function replaceFile(tmp, target) {
     fs.renameSync(tmp, target);
   } catch (err) {
     if (['EBUSY', 'EPERM', 'EACCES'].includes(err.code)) {
-      throw new Error(`无法替换 ${target}（${err.code}）：文件可能被 Excel 锁住，请关闭后重新运行 export`);
+      throw new Error(CONSOLE.replaceFailed(target, err.code));
     }
     throw err;
   }
@@ -805,33 +847,35 @@ function resolveOut(out, excelFile) {
 }
 
 /**
- * Copy the finished workbook to `out` (via a temp file + rename, so a reader
- * never sees half a copy). Throws `另存 Excel 到 … 失败：…` on any failure.
+ * Copy a finished workbook to `target` (via a temp file + rename, so a reader
+ * never sees half a copy). The workbook itself is not copied onto itself, and a
+ * copy never replaces the other edition's workbook (`other`). Throws
+ * `failed(target, reason)` (e.g. "另存 Excel 到 … 失败：…") on any failure.
  */
-function copyOut(excelFile, out) {
-  const target = resolveOut(out, excelFile);
-  if (target === path.resolve(excelFile)) return target;
+function copyOut(source, target, { other, failed }) {
+  if (target === path.resolve(source)) return target;
+  if (target === path.resolve(other)) throw new Error(failed(target, CONSOLE.copyOntoOther));
   const tmp = tempPathFor(target);
   try {
     ensureDir(path.dirname(target));
-    fs.copyFileSync(excelFile, tmp);
+    fs.copyFileSync(source, tmp);
     fs.renameSync(tmp, target);
   } catch (err) {
     removeQuietly(tmp);
-    throw new Error(`另存 Excel 到 ${target} 失败：${err.message}`);
+    throw new Error(failed(target, err.message));
   }
   return target;
 }
 
 // ---------------------------------------------------------------------------
-// Context: everything the sheets need, computed once
+// Context: everything the sheets need, computed once for both editions
 // ---------------------------------------------------------------------------
 
 function buildContext({ config, selection, entries, journal, tags, verify, usage, running, generatedAt, warn }) {
   const params = selection.params ?? {};
   let timeZone = params.timezone || config.timezone || DEFAULT_TIMEZONE;
   if (!validTimeZone(timeZone)) {
-    warn(`时区 "${timeZone}" 无效，Excel 里的时间改用 ${DEFAULT_TIMEZONE}`);
+    warn(CONSOLE.badTimeZone(timeZone, DEFAULT_TIMEZONE));
     timeZone = DEFAULT_TIMEZONE;
   }
   const clock = clockFor(timeZone);
@@ -846,9 +890,9 @@ function buildContext({ config, selection, entries, journal, tags, verify, usage
   let tagsFetchedMs = null; // when the tag snapshot was taken; null = no usable snapshot
   if (tags) {
     if (String(tags.tag ?? '').toLowerCase() !== String(sentTag).toLowerCase()) {
-      warn(`tags.json 记录的是 tag "${tags.tag}"，不是本活动的 "${sentTag}"，已忽略`);
+      warn(CONSOLE.foreignTags(tags.tag, sentTag));
     } else if (!Array.isArray(tags.ids)) {
-      warn('tags.json 里没有客户列表（ids），已忽略');
+      warn(CONSOLE.tagsWithoutIds);
     } else {
       taggedIds = new Set(tags.ids);
       tagsFetchedMs = toMs(tags.fetchedAt);
@@ -888,12 +932,11 @@ function buildContext({ config, selection, entries, journal, tags, verify, usage
 
   // Campaign dates. LAUNCH_DATE / REMIND_n_DATE are shown as the commands
   // check them now (.env); the expiry as frozen in the list, because every card
-  // is created with that one. A difference to the list gets a note.
+  // is created with that one. A difference to the list gets a note (summary sheet).
   const dateSetting = (current, frozen) => {
     const now = current || '';
     const then = frozen ?? null; // null: a list written without this parameter, nothing to compare
-    const changed = then !== null && (then || '') !== now;
-    return { current: now, frozen: then, changed, note: changed ? `生成名单时为 ${then || '未设置'}，现在按 .env 为 ${now || '未设置'}` : null };
+    return { current: now, frozen: then, changed: then !== null && (then || '') !== now };
   };
   // issue creates every card with the list's expiry ('' = none), whatever .env says now.
   const expiryFrozen = params.giftCardExpiresOn || '';
@@ -920,7 +963,7 @@ function buildContext({ config, selection, entries, journal, tags, verify, usage
     return { r, state, status, cardCents, card };
   });
 
-  const ctx = {
+  const base = {
     config,
     selection,
     params,
@@ -931,7 +974,6 @@ function buildContext({ config, selection, entries, journal, tags, verify, usage
     running,
     generatedAt,
     timeZone,
-    tzLabel: timeZoneLabel(timeZone),
     shop,
     sentTag,
     tiersCents,
@@ -966,13 +1008,6 @@ function buildContext({ config, selection, entries, journal, tags, verify, usage
       const d = clock.dayNumber(iso);
       return d === null || exportedDay === null ? null : exportedDay - d;
     },
-    tierText(r) {
-      if (r.kind === 'test') return '测试';
-      return Number.isInteger(r.tier) ? txt(tierLabel(r.tier, tiersCents)) : null;
-    },
-    remindText(state, round) {
-      return txt(remindLabel(state?.reminders?.[round], running, timeZone));
-    },
     /** This campaign's tag for reminder `round` (1 / '1' / 2 / '2'), e.g. OCT26RTPROMO-R1; null for any other round. */
     roundTag(round) {
       const n = Number(round);
@@ -989,34 +1024,53 @@ function buildContext({ config, selection, entries, journal, tags, verify, usage
       return names?.size ? txt([...names].filter(Boolean).join(', ')) : null;
     },
   };
+  base.progress = computeProgress(rows);
+  base.reminders = computeReminders(rows, running);
+  base.usageSummary = usage ? normalizeUsageSummary(usage, cards) : null;
+  return base;
+}
+
+/** The context of one edition: the shared data plus the texts of pack `T` (ctx.T, ctx.lang). */
+function localize(base, T) {
+  const { running, timeZone, tiersCents } = base;
+  const ctx = {
+    ...base,
+    T,
+    lang: T.lang,
+    tzLabel: timeZoneLabel(timeZone, T),
+    tierText(r) {
+      if (r.kind === 'test') return T.recipients.testTier;
+      return Number.isInteger(r.tier) ? txt(tierLabel(r.tier, tiersCents)) : null;
+    },
+    remindText(state, round) {
+      return txt(remindLabel(state?.reminders?.[round], running, timeZone, T));
+    },
+  };
   ctx.notesFor = (x) => recipientNotes(x, ctx);
-  ctx.progress = computeProgress(rows);
-  ctx.reminders = computeReminders(rows, running);
-  ctx.usageSummary = usage ? normalizeUsageSummary(usage, cards) : null;
   return ctx;
 }
 
-/** "备注/错误": why a row is special, joined with "；". */
+/** "备注/错误": why a row is special, joined with the pack's list separator. */
 function recipientNotes({ r, state, status }, ctx) {
+  const { T } = ctx;
+  const N = T.recipients.notes;
   const notes = [];
   if (state) {
-    if (status === 'skipped' && state.skipReason) notes.push(issueSkipText(state.skipReason));
-    if (state.status === 'in_progress' && status !== 'in_progress') {
-      notes.push('建卡请求发出后没有记录结果（运行被中断）；下次运行 issue 会先去 Shopify 查找这张卡');
-    }
-    if (state.error) notes.push(errorText(state.error));
-    if (state.reconciledFrom) notes.push(`卡由${labelOf(RECONCILE_SOURCE_LABELS, state.reconciledFrom)}在 Shopify 找到后补记`);
+    if (status === 'skipped' && state.skipReason) notes.push(issueSkipText(state.skipReason, undefined, undefined, T));
+    if (state.status === 'in_progress' && status !== 'in_progress') notes.push(N.interrupted);
+    if (state.error) notes.push(errorText(state.error, T));
+    if (state.reconciledFrom) notes.push(N.reconciledFrom(labelOf(T.RECONCILE_SOURCE_LABELS, state.reconciledFrom)));
     if (state.giftCardId && Number.isInteger(state.amountCents) && Number.isInteger(r.amountCents) && state.amountCents !== r.amountCents) {
-      notes.push(`卡的金额 ${formatUsd(state.amountCents)} 与名单金额 ${formatUsd(r.amountCents)} 不同`);
+      notes.push(N.amountDiffers(formatUsd(state.amountCents), formatUsd(r.amountCents)));
     }
   }
   // basisWhy is also set when no earlier paid order was found (then neverReason
   // explains it), so the "earlier order" note only applies with a basis order.
-  if (r.basis && BASIS_NOTES[r.basisWhy]) notes.push(BASIS_NOTES[r.basisWhy]);
-  if (NEVER_NOTES[r.neverReason]) notes.push(NEVER_NOTES[r.neverReason]);
+  if (r.basis && T.BASIS_NOTES[r.basisWhy]) notes.push(T.BASIS_NOTES[r.basisWhy]);
+  if (T.NEVER_NOTES[r.neverReason]) notes.push(T.NEVER_NOTES[r.neverReason]);
   const group = r.groupId ? ctx.groupsById.get(r.groupId) : null;
-  if (group?.flaggedBulk) notes.push(`同地址 ${group.size} 个账户，疑似批量注册`);
-  return txt(notes.join('；'));
+  if (group?.flaggedBulk) notes.push(N.bulk(group.size));
+  return txt(notes.join(T.sep.list));
 }
 
 function computeProgress(rows) {
@@ -1122,47 +1176,50 @@ async function writeSheets(book, ctx) {
   await writeHelpSheet(book, ctx);
 }
 
-// ---- 使用报告 ---------------------------------------------------------------
+// ---- 使用报告 (usage report) -------------------------------------------------
 
 async function writeUsageReportSheet(book, ctx) {
+  const { T } = ctx;
+  const U = T.usageReport;
+  const P = T.moneyPrefix;
   const u = ctx.usageSummary;
-  const asOf = ctx.stamp(ctx.usage.fetchedAt) || '未知时间';
-  const s = book.sheet('使用报告', { widths: [36, 16, 28, 28, 16, 14] });
+  const asOf = ctx.stamp(ctx.usage.fetchedAt) || U.unknownTime;
+  const s = book.sheet(T.sheets.usageReport, { widths: [36, 16, 28, 28, 16, 14] });
   const c = (kind) => cellStyle(kind);
   const label = cellStyle('bold', null, false);
 
-  await s.add([`使用报告（截至 ${asOf}，${ctx.tzLabel}）`], TITLE, { height: 24 });
+  await s.add([U.title(asOf, ctx.tzLabel)], TITLE, { height: 24 });
   await s.blank();
   // Totals, laid out like the plan's sample; the units live in the number formats
   // so every figure stays a real number.
-  await s.add(['发出礼品卡', u.issuedCards, money(u.issuedCents)], [label, formatStyle('#,##0" 张"'), prefixedMoney('面额 ')]);
-  await s.add(['已经使用', u.usedCards, u.usedRate, money(u.usedCents), u.usedCentsRate], [
+  await s.add([U.issued, u.issuedCards, money(u.issuedCents)], [label, formatStyle(T.fmt.cards), prefixedMoney(P.faceValue)]);
+  await s.add([U.used, u.usedCards, u.usedRate, money(u.usedCents), u.usedCentsRate], [
     label,
-    formatStyle('#,##0" 张"'),
-    formatStyle('"占 "0.0%'),
-    prefixedMoney('已用 '),
-    formatStyle('"占面额 "0.0%'),
+    formatStyle(T.fmt.cards),
+    formatStyle(T.fmt.share),
+    prefixedMoney(P.used),
+    formatStyle(T.fmt.shareOfValue),
   ]);
-  await s.add(['带来订单', u.orders, money(u.ordersTotalCents), money(u.avgOrderCents)], [label, formatStyle('#,##0" 笔"'), prefixedMoney('订单总额 '), prefixedMoney('平均每单 ')]);
-  await s.add([null, null, money(u.giftCardCents), money(u.customerPaidCents)], [null, null, prefixedMoney('其中礼品卡抵扣 '), prefixedMoney('顾客另外支付 ')]);
-  // 礼品卡抵扣 (at checkout) and 已用 (card balances) differ after a refund back to a card.
-  await s.add([USAGE_SPLIT_NOTE], NOTE);
+  await s.add([U.orders, u.orders, money(u.ordersTotalCents), money(u.avgOrderCents)], [label, formatStyle(T.fmt.orders), prefixedMoney(P.ordersTotal), prefixedMoney(P.perOrder)]);
+  await s.add([null, null, money(u.giftCardCents), money(u.customerPaidCents)], [null, null, prefixedMoney(P.giftCardPaid), prefixedMoney(P.customerPaid)]);
+  // The gift-card part at checkout and the used amount (card balances) differ after a refund back to a card.
+  await s.add([T.USAGE_SPLIT_NOTE], NOTE);
 
   await s.blank();
-  await s.header(['按档位', '发出', '已使用', '使用率', '已用金额']);
+  await s.header(U.byTier);
   for (const t of u.byTier) {
     const name = t.label || (Number.isInteger(t.tier) ? tierLabel(t.tier, ctx.tiersCents) : '') || String(t.tier ?? '');
     await s.add([txt(name), num(t.issued), num(t.used), ratio(t.used, t.issued) ?? rateValue(t.rate), money(t.usedCents)], [c('text'), c('count'), c('count'), c('pct'), c('money')]);
   }
 
   await s.blank();
-  await s.header(['按客户类型', '发出', '已使用', '使用率', '已用金额']);
+  await s.header(U.byKind);
   for (const k of u.byKind) {
-    await s.add([labelOf(KIND_LABELS, k.kind) || null, num(k.issued), num(k.used), ratio(k.used, k.issued) ?? rateValue(k.rate), money(k.usedCents)], [c('text'), c('count'), c('count'), c('pct'), c('money')]);
+    await s.add([labelOf(T.KIND_LABELS, k.kind) || null, num(k.issued), num(k.used), ratio(k.used, k.issued) ?? rateValue(k.rate), money(k.usedCents)], [c('text'), c('count'), c('count'), c('pct'), c('money')]);
   }
 
   await s.blank();
-  await s.header(['每日', '当天新用的卡', '当天订单', '当天订单金额', '累计使用的卡', '累计使用率']);
+  await s.header(U.daily);
   for (const d of u.daily) {
     const cumulative = num(d.cumulativeCardsUsed);
     await s.add([ymd(d.date) ?? txt(d.date), num(d.newCardsUsed), num(d.orders), money(d.ordersTotalCents), cumulative, ratio(cumulative, u.issuedCards) ?? rateValue(d.cumulativeRate)], [
@@ -1176,25 +1233,26 @@ async function writeUsageReportSheet(book, ctx) {
   }
 
   await s.blank();
-  await s.header(['卖得最多的 10 个商品', '数量', '金额']);
+  await s.header(U.topProducts);
   for (const p of u.topProducts.slice(0, 10)) {
-    await s.add([txt(p.name), num(p.quantity), money(p.amountCents)], [c('text'), c('count'), c('money')]);
+    await s.add([txt(T.stored.productName(p.name)), num(p.quantity), money(p.amountCents)], [c('text'), c('count'), c('money')]);
   }
 
   await s.blank();
-  await s.add([`截至 ${asOf}（${ctx.tzLabel}）。每天运行一次 usage 更新本表；卡的余额小于原金额就算已使用。`], NOTE);
+  await s.add([U.footer(asOf, ctx.tzLabel)], NOTE);
   await s.finish();
 }
 
-// ---- 汇总 -------------------------------------------------------------------
+// ---- 汇总 (summary) ----------------------------------------------------------
 
 async function writeSummarySheet(book, ctx) {
-  const { selection, params } = ctx;
+  const { selection, params, T } = ctx;
+  const S = T.summary;
   const stats = selection.stats ?? {};
   const funnel = selection.funnel ?? null;
   const snapshot = selection.snapshot ?? {};
-  // The 9th column is only used by the 提醒 table (本轮 tag).
-  const s = book.sheet('汇总', { widths: [40, 18, 14, 14, 14, 12, 18, 70, 24] });
+  // The 9th column is only used by the reminders table (round tag).
+  const s = book.sheet(T.sheets.summary, { widths: [40, 18, 14, 14, 14, 12, 18, 70, 24] });
   const plain = (kind) => cellStyle(kind, null, false);
   const kv = (label, value, kind = 'text', note = null, noteStyle = NOTE) => s.add([label, value ?? null, note ?? null], [LABEL, plain(kind), noteStyle]);
   const section = async (title) => {
@@ -1202,134 +1260,137 @@ async function writeSummarySheet(book, ctx) {
     await s.add([title], SECTION, { height: 22 });
   };
   const trow = (values, kinds) => s.add(values, kinds.map((k) => (typeof k === 'string' ? cellStyle(k) : k)));
+  // Rows sorted by count, then by the stored key: both editions list them in the same order.
   const breakdown = async (title, counts, keyLabel = (k) => k) => {
     const items = Object.entries(counts ?? {}).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])));
     if (!items.length) return;
     await s.blank();
-    await s.header([title, '人数']);
-    for (const [k, n] of items) await trow([txt(keyLabel(k)) ?? '（空）', n], ['text', 'count']);
+    await s.header([title, S.people]);
+    for (const [k, n] of items) await trow([txt(keyLabel(k)) ?? S.emptyKey, n], ['text', 'count']);
   };
+  /** The note of a .env date that differs from the list's. */
+  const changedNote = (date) => S.dateChanged(date.frozen || T.notSet, date.current || T.notSet);
 
-  await s.add(['本文件由程序生成，修改无效，每次运行会覆盖'], NOTICE, { height: 20 });
-  await s.add([`活动 ${ctx.campaignId} · ${ctx.isTest ? '测试活动' : '正式活动'} · 生成于 ${ctx.stamp(ctx.generatedAt)}（${ctx.tzLabel}）`], NOTE);
+  await s.add([S.notice], NOTICE, { height: 20 });
+  await s.add([S.subtitle(ctx.campaignId, ctx.isTest, ctx.stamp(ctx.generatedAt), ctx.tzLabel)], NOTE);
 
   // ---- campaign parameters
-  await section('活动参数');
-  await kv('活动 ID（CAMPAIGN_ID）', ctx.campaignId);
-  await kv('名单类型', ctx.isTest ? '测试活动：只取 TEST_CUSTOMER_IDS 里的客户，不套用筛选规则，金额固定' : '正式活动：按筛选规则选出');
-  await kv('名单生成时间', ctx.time(selection.createdAt), 'datetime');
-  await kv('客户数据导出时间', ctx.time(snapshot.exportedAt), 'datetime', `${labelOf(SNAPSHOT_SOURCE_LABELS, snapshot.source) || '来源未知'}，共 ${fmtCount(snapshot.count)} 个客户`);
+  await section(S.params);
+  await kv(S.campaignId, ctx.campaignId);
+  await kv(S.listType, ctx.isTest ? S.listTypeTest : S.listTypeLive);
+  await kv(S.createdAt, ctx.time(selection.createdAt), 'datetime');
+  await kv(S.exportedAt, ctx.time(snapshot.exportedAt), 'datetime', S.exportedNote(labelOf(T.SNAPSHOT_SOURCE_LABELS, snapshot.source) || S.sourceUnknown, fmtCount(snapshot.count)));
   if (ctx.isTest) {
-    await kv('测试固定金额', money(params.testGiftAmountCents ?? ctx.rows[0]?.r.amountCents), 'money');
+    await kv(S.testAmount, money(params.testGiftAmountCents ?? ctx.rows[0]?.r.amountCents), 'money');
   } else {
-    await kv(`近 ${ctx.inactiveMonths} 个月下单的起算日（cutoff）`, ctx.ymd(params.cutoffDate), 'date', '这一天 0 点（店铺时间）以后有有效订单的人不发');
-    await kv('注册满', `${params.minAccountAgeDays ?? ctx.config.minAccountAgeDays} 天`);
-    await kv('要求已订阅营销邮件', (params.requireEmailSubscribed ?? ctx.config.requireEmailSubscribed) ? '是' : '否');
-    await kv('金额比例', `${params.giftPercent ?? ctx.config.giftPercent}%`, 'text', '基数 = 上次有效订单总额 × 比例，四舍五入到分，再对档位');
-    await kv('档位（按基数）', ctx.tiersCents.length ? describeTiers(ctx.tiersCents).join('；') : null);
-    await kv('有下单入选者上次订单的平均值', money(selection.averageCents), 'money', '从没下单的人用“平均值 × 比例”对档位');
-    await kv('从没下单的人发放金额', money(selection.neverAmountCents), 'money');
+    await kv(S.cutoff(ctx.inactiveMonths), ctx.ymd(params.cutoffDate), 'date', S.cutoffNote);
+    await kv(S.minAge, S.days(params.minAccountAgeDays ?? ctx.config.minAccountAgeDays));
+    await kv(S.requireSubscribed, (params.requireEmailSubscribed ?? ctx.config.requireEmailSubscribed) ? T.yes : T.no);
+    await kv(S.percent, S.percentValue(params.giftPercent ?? ctx.config.giftPercent), 'text', S.percentNote);
+    await kv(S.tiers, ctx.tiersCents.length ? T.describeTiers(ctx.tiersCents).join(T.sep.list) : null);
+    await kv(S.average, money(selection.averageCents), 'money', S.averageNote);
+    await kv(S.neverAmount, money(selection.neverAmountCents), 'money');
   }
   // The expiry is frozen in the list (every card is created with it); the
   // launch and reminder dates are the current .env values the commands check.
   const { expiry, launch, remind1, remind2 } = ctx.dates;
   await kv(
-    '礼品卡到期日',
-    expiry.frozen ? ctx.ymd(expiry.frozen) : '不设到期日',
+    S.expiry,
+    expiry.frozen ? ctx.ymd(expiry.frozen) : S.noExpiry,
     'date',
-    expiry.changed ? `到期日当天仍可使用。注意：.env 的 GIFT_CARD_EXPIRES_ON 现在是 ${expiry.env || '未设置'}，但建卡仍用生成名单时的 ${expiry.frozen || '不设到期日'}` : '到期日当天仍可使用',
+    expiry.changed ? S.expiryChanged(expiry.env || T.notSet, expiry.frozen || S.noExpiry) : S.expiryNote,
     expiry.changed ? CHANGED : NOTE,
   );
-  for (const [label, date] of [['首封邮件日期（正式建卡）', launch], ['第一次提醒', remind1], ['第二次提醒', remind2]]) {
-    await kv(label, ctx.ymd(date.current) ?? '未设置', 'date', date.changed ? date.note : null, CHANGED);
+  for (const [label, date] of [[S.launchDate, launch], [S.remind1Date, remind1], [S.remind2Date, remind2]]) {
+    await kv(label, ctx.ymd(date.current) ?? T.notSet, 'date', date.changed ? changedNote(date) : null, CHANGED);
   }
-  await kv('发放 tag（SENT_TAG）', ctx.sentTag);
+  await kv(S.sentTag, ctx.sentTag);
   if (!ctx.isTest) {
     const list = (v, f = String) => (Array.isArray(v) ? txt(v.map(f).join(', ')) : txt(v));
-    await kv('排除的 tag（不分大小写）', list(params.excludeTags));
-    await kv('排除的邮箱域名', list(params.excludeEmailDomains));
-    await kv('排除的订单渠道', list(params.excludeOrderSources, sourceText));
+    await kv(S.excludeTags, list(params.excludeTags));
+    await kv(S.excludeDomains, list(params.excludeEmailDomains));
+    await kv(S.excludeSources, list(params.excludeOrderSources, (source) => sourceText(source, T)));
   }
-  await kv('礼品卡币种', params.currency ?? ctx.config.giftCardCurrency);
-  await kv('礼品卡内部备注（note）', campaignNote(params.giftCardNote ?? ctx.config.giftCardNote, ctx.campaignId));
-  await kv('邮件和礼品卡页面模板后缀', txt(params.giftCardTemplateSuffix ?? ctx.config.giftCardTemplateSuffix));
+  await kv(S.currency, params.currency ?? ctx.config.giftCardCurrency);
+  await kv(S.note, campaignNote(params.giftCardNote ?? ctx.config.giftCardNote, ctx.campaignId));
+  await kv(S.templateSuffix, txt(params.giftCardTemplateSuffix ?? ctx.config.giftCardTemplateSuffix));
 
   // ---- funnel
   if (funnel) {
-    await section('筛选漏斗');
-    await s.header(['条件（按顺序判断，第一个不满足的记为排除原因）', '排除人数', '“未入选”表']);
-    await trow(['全店客户', num(funnel.total), null], ['bold', 'count', 'text']);
+    await section(S.funnel);
+    await s.header(S.funnelHeader);
+    await trow([S.allCustomers, num(funnel.total), null], ['bold', 'count', 'text']);
     for (const r of objects(funnel.byRule)) {
-      await trow([`${r.n}. ${r.label}`, num(r.count), UNLISTED_RULES.has(r.code) ? '只计数' : '逐行列出'], ['text', 'count', 'text']);
+      await trow([S.ruleRow(r.n, T.stored.ruleLabel(r, params)), num(r.count), UNLISTED_RULES.has(r.code) ? S.countedOnly : S.listed], ['text', 'count', 'text']);
     }
-    await trow(['最终入选', num(funnel.recipients), null], ['bold', 'count', 'text']);
-    await s.add([`“未入选”表逐行列出 ${fmtCount(funnel.listed)} 人；只因第 1–3 条（没邮箱、平台中转或占位邮箱、未订阅营销邮件）被排除的 ${fmtCount(funnel.unlisted)} 人只计数，不逐行列出。`], NOTE);
-    await breakdown('第 2 条：按邮箱域名', funnel.relayDomains);
-    await breakdown('第 3 条：按营销状态', funnel.notSubscribed, (k) => labelOf(MARKETING_LABELS, k));
-    await breakdown('第 5 条：按 tag', funnel.tags);
-    await breakdown('第 9 条：按渠道', funnel.channels);
+    await trow([S.finalRecipients, num(funnel.recipients), null], ['bold', 'count', 'text']);
+    await s.add([S.funnelNote(fmtCount(funnel.listed), fmtCount(funnel.unlisted))], NOTE);
+    await breakdown(S.byDomain, funnel.relayDomains);
+    await breakdown(S.byMarketing, funnel.notSubscribed, (k) => labelOf(T.MARKETING_LABELS, k));
+    await breakdown(S.byTag, funnel.tags);
+    await breakdown(S.byChannel, funnel.channels, (k) => T.stored.channel(k));
   }
 
   // ---- same-address dedupe
   const d = stats.duplicates;
   if (d && !ctx.isTest) {
-    await section('同地址去重');
-    await kv('重复组数', num(d.groups), 'count');
-    await kv('涉及的候选账户', num(d.accounts), 'count');
-    await kv('少发人数（每组只保留一个账户）', num(d.removed), 'count');
-    await kv('疑似批量注册（一个地址 10 个以上账户）', num(d.flaggedBulk), 'count', '仍按规则每组发一张，详见“同地址重复”表');
-    if (Array.isArray(d.largest) && d.largest.length) await kv('最大的几组（账户数）', d.largest.join('、'));
-    await kv('没有可比对地址、不参与去重的入选者', num(stats.noAddressRecipients), 'count');
+    await section(S.dedupe);
+    await kv(S.groups, num(d.groups), 'count');
+    await kv(S.accounts, num(d.accounts), 'count');
+    await kv(S.removed, num(d.removed), 'count');
+    await kv(S.bulk, num(d.flaggedBulk), 'count', S.bulkNote);
+    if (Array.isArray(d.largest) && d.largest.length) await kv(S.largest, d.largest.join(T.sep.enum));
+    await kv(S.noAddress, num(stats.noAddressRecipients), 'count');
   }
 
   // ---- amounts
-  await section('金额');
-  await s.header(['档位', '有下单', '从没下单', '人数', '合计金额']);
+  await section(S.amounts);
+  await s.header(S.amountsHeader);
   if (ctx.isTest) {
-    await trow([`测试固定金额 ${formatUsd(params.testGiftAmountCents ?? ctx.rows[0]?.r.amountCents)}`, null, null, num(stats.recipients ?? ctx.rows.length), money(stats.totalCents)], ['text', 'count', 'count', 'count', 'money']);
+    await trow([S.testTier(formatUsd(params.testGiftAmountCents ?? ctx.rows[0]?.r.amountCents)), null, null, num(stats.recipients ?? ctx.rows.length), money(stats.totalCents)], ['text', 'count', 'count', 'count', 'money']);
   } else {
     for (const t of objects(stats.tiers)) {
       await trow([txt(t.label ?? tierLabel(t.tier, ctx.tiersCents)), num(t.ordered), num(t.never), num(t.count), money(t.cents)], ['text', 'count', 'count', 'count', 'money']);
     }
-    await trow(['合计', num(stats.orderedCount), num(stats.neverCount), num(stats.recipients), money(stats.totalCents)], ['bold', 'count', 'count', 'count', 'money']);
+    await trow([S.total, num(stats.orderedCount), num(stats.neverCount), num(stats.recipients), money(stats.totalCents)], ['bold', 'count', 'count', 'count', 'money']);
     const bf = stats.basisFromEarlier ?? {};
     const count = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
-    const why = [`最近一笔已取消 ${fmtCount(count(bf.lastCancelled))} 人`];
-    if (count(bf.lastTest) > 0) why.push(`最近一笔是测试订单 ${fmtCount(bf.lastTest)} 人`); // older lists have no lastTest
-    why.push(`最近一笔是 $0 ${fmtCount(count(bf.lastZero))} 人`);
-    await kv('有下单的人合计', money(stats.orderedCents), 'money', `${fmtCount(stats.orderedCount)} 人`);
-    await kv('从没下单的人合计', money(stats.neverCents), 'money', `${fmtCount(stats.neverCount)} 人`);
-    await kv('按更早的付费订单计算', `${fmtCount(count(bf.lastCancelled) + count(bf.lastTest) + count(bf.lastZero))} 人`, 'text', why.join('，'));
-    await kv('订单都已取消或都是 $0，按从没下单处理', `${fmtCount(stats.neverReasons?.onlyCancelledOrZero)} 人`);
-    await kv('有下单的人基数的中位数', money(stats.medianOrderedRawCents), 'money');
+    const why = [S.whyCancelled(fmtCount(count(bf.lastCancelled)))];
+    if (count(bf.lastTest) > 0) why.push(S.whyTest(fmtCount(bf.lastTest))); // older lists have no lastTest
+    why.push(S.whyZero(fmtCount(count(bf.lastZero))));
+    await kv(S.orderedTotal, money(stats.orderedCents), 'money', S.personCount(fmtCount(stats.orderedCount)));
+    await kv(S.neverTotal, money(stats.neverCents), 'money', S.personCount(fmtCount(stats.neverCount)));
+    await kv(S.fromEarlier, S.personCount(fmtCount(count(bf.lastCancelled) + count(bf.lastTest) + count(bf.lastZero))), 'text', why.join(T.sep.comma));
+    await kv(S.onlyCancelled, S.personCount(fmtCount(stats.neverReasons?.onlyCancelledOrZero)));
+    await kv(S.median, money(stats.medianOrderedRawCents), 'money');
   }
 
   // ---- issuing progress
   const p = ctx.progress;
-  await section('发放进度');
-  await s.header(['状态', '人数', '金额']);
+  await section(S.progress);
+  await s.header(S.progressHeader);
   for (const [status, b] of p.byStatus) {
-    await s.add([STATUS_LABELS[status] ?? status, b.count, money(b.cents)], [cellStyle('text', STATUS_FILLS[status] ?? null), cellStyle('count'), cellStyle('money')]);
+    await s.add([T.STATUS_LABELS[status] ?? status, b.count, money(b.cents)], [cellStyle('text', STATUS_FILLS[status] ?? null), cellStyle('count'), cellStyle('money')]);
   }
-  await trow(['合计', p.total.count, money(p.total.cents)], ['bold', 'count', 'money']);
+  await trow([S.total, p.total.count, money(p.total.cents)], ['bold', 'count', 'money']);
   // Only batches that created cards count (an issue --repair-only or date-blocked run creates none).
-  await kv('已发放到第几批', ctx.journal.lastIssuedBatch ?? ctx.journal.lastBatch ?? null, 'int');
-  await kv('下一个待发放的序号', p.nextPendingSeq ?? '没有待发放的人', 'int');
+  await kv(S.lastBatch, ctx.journal.lastIssuedBatch ?? ctx.journal.lastBatch ?? null, 'int');
+  await kv(S.nextSeq, p.nextPendingSeq ?? S.nothingPending, 'int');
   if (p.skipReasons.size) {
     await s.blank();
-    await s.header(['发放前跳过的原因', '人数']);
-    for (const [reason, n] of [...p.skipReasons].sort((a, b) => b[1] - a[1])) await trow([issueSkipText(reason) || '原因未记录', n], ['text', 'count']);
+    await s.header(S.skipReasonsHeader);
+    for (const [reason, n] of [...p.skipReasons].sort((a, b) => b[1] - a[1])) await trow([issueSkipText(reason, undefined, undefined, T) || S.reasonMissing, n], ['text', 'count']);
   }
-  await s.add(['金额：已建卡的按卡的金额，其余按名单金额。“进行中”只在 issue 运行时出现；issue 不在运行时，这些人算作“需人工核对”。'], NOTE);
+  await s.add([S.progressNote], NOTE);
 
   // ---- reminders
   const rem = ctx.reminders;
-  await section('提醒');
-  await s.header(['轮次', '提醒日期', '已发', '跳过', '失败', '结果不明', '进行中', '还没处理（已建卡的人）', '本轮 tag']);
+  await section(S.reminders);
+  await s.header(S.remindersHeader);
   for (const round of ['1', '2']) {
     const c = rem[round];
     const date = round === '1' ? remind1 : remind2;
-    await trow([`第 ${round} 次提醒`, ctx.ymd(date.current) ?? '未设置', c.sent, c.skipped, c.failed, c.unknown, c.inProgress, c.notYet, ctx.roundTag(round)], [
+    await trow([T.roundName(round), ctx.ymd(date.current) ?? T.notSet, c.sent, c.skipped, c.failed, c.unknown, c.inProgress, c.notYet, ctx.roundTag(round)], [
       'text',
       'date',
       'count',
@@ -1344,49 +1405,44 @@ async function writeSummarySheet(book, ctx) {
   const reasons = [...new Set([...rem['1'].reasons.keys(), ...rem['2'].reasons.keys()])];
   if (reasons.length) {
     await s.blank();
-    await s.header(['提醒跳过的原因', '第 1 次', '第 2 次']);
+    await s.header(S.remindSkipHeader);
     for (const reason of reasons) {
-      await trow([remindSkipText(reason) || '原因未记录', rem['1'].reasons.get(reason) ?? 0, rem['2'].reasons.get(reason) ?? 0], ['text', 'count', 'count']);
+      await trow([remindSkipText(reason, undefined, undefined, T) || S.reasonMissing, rem['1'].reasons.get(reason) ?? 0, rem['2'].reasons.get(reason) ?? 0], ['text', 'count', 'count']);
     }
   }
   for (const [round, date] of [['1', remind1], ['2', remind2]]) {
-    if (date.changed) await s.add([`第 ${round} 次提醒日期：${date.note}（remind 按现在的日期判断哪天能发）`], CHANGED);
+    if (date.changed) await s.add([S.remindDateChanged(round, changedNote(date))], CHANGED);
   }
-  const audience = ctx.isTest
-    ? '已建卡、卡还没用过（余额等于原金额）、没停用没过期的人（测试活动不看营销订阅状态）'
-    : '已建卡、卡还没用过（余额等于原金额）、没停用没过期、仍订阅营销邮件的人';
-  await s.add([
-    `提醒只发给${audience}；每一轮每人最多一封：发出后给客户打上本轮 tag，带本轮 tag 的人这一轮不会再发，即使本地日志丢失。跳过的人再次运行同一轮会重新判断。`,
-  ], NOTE);
+  await s.add([S.remindNote(ctx.isTest ? S.audienceTest : S.audienceLive)], NOTE);
 
   // ---- usage
   if (ctx.usageSummary) {
     const u = ctx.usageSummary;
-    await section('使用情况');
-    await kv('截至', ctx.time(ctx.usage.fetchedAt), 'datetime');
-    await kv('发出礼品卡（张）', u.issuedCards, 'count');
-    await kv('发出面额', money(u.issuedCents), 'money');
-    await kv('已经使用（张）', u.usedCards, 'count', u.usedRate, formatStyle('"占 "0.0%'));
-    await kv('已用金额', money(u.usedCents), 'money', u.usedCentsRate, formatStyle('"占面额 "0.0%'));
-    await kv('带来订单（笔）', u.orders, 'count');
-    await kv('订单总额', money(u.ordersTotalCents), 'money');
-    await kv('平均每单', money(u.avgOrderCents), 'money');
-    await kv('礼品卡抵扣', money(u.giftCardCents), 'money', USAGE_SPLIT_NOTE);
-    await kv('顾客另外支付', money(u.customerPaidCents), 'money');
-    if (u.topProducts.length) await kv('卖得最多的商品', txt(u.topProducts.slice(0, 3).map((x) => `${x.name} × ${x.quantity}`).join('；')));
-    await kv('每日趋势', '见“使用报告”表');
+    await section(S.usage);
+    await kv(S.asOf, ctx.time(ctx.usage.fetchedAt), 'datetime');
+    await kv(S.issuedCards, u.issuedCards, 'count');
+    await kv(S.issuedValue, money(u.issuedCents), 'money');
+    await kv(S.usedCards, u.usedCards, 'count', u.usedRate, formatStyle(T.fmt.share));
+    await kv(S.usedValue, money(u.usedCents), 'money', u.usedCentsRate, formatStyle(T.fmt.shareOfValue));
+    await kv(S.orders, u.orders, 'count');
+    await kv(S.ordersTotal, money(u.ordersTotalCents), 'money');
+    await kv(S.perOrder, money(u.avgOrderCents), 'money');
+    await kv(S.giftCardPaid, money(u.giftCardCents), 'money', T.USAGE_SPLIT_NOTE);
+    await kv(S.customerPaid, money(u.customerPaidCents), 'money');
+    if (u.topProducts.length) await kv(S.topProducts, txt(u.topProducts.slice(0, 3).map((x) => `${T.stored.productName(x.name)} × ${x.quantity}`).join(T.sep.list)));
+    await kv(S.dailyTrend, S.seeUsageReport);
   }
 
   // ---- run history
-  await section('运行记录');
-  await s.header(['开始时间', '命令', '预演/实际', '批次/轮次', '数量上限', '退出码', '结束时间', '结果摘要']);
+  await section(S.runs);
+  await s.header(S.runsHeader);
   const runs = [...ctx.journal.runs].sort((a, b) => String(a.startedAt).localeCompare(String(b.startedAt)));
   const lastOpen = new Map(); // command → its newest run without run.end
   for (const run of runs) if (!run.endedAt) lastOpen.set(run.command, run);
   for (const run of runs) {
-    let summary = summaryText(run.summary, { command: run.command, dryRun: run.dryRun });
-    if (!run.endedAt) summary = ctx.running === run.command && lastOpen.get(run.command) === run ? '运行中' : '没有正常结束（可能被中断）';
-    await trow([ctx.time(run.startedAt), txt(run.command), run.dryRun ? '预演' : '实际', runBatchText(run), num(run.limit), num(run.exitCode), ctx.time(run.endedAt), txt(summary)], [
+    let summary = summaryText(run.summary, { command: run.command, dryRun: run.dryRun }, T);
+    if (!run.endedAt) summary = ctx.running === run.command && lastOpen.get(run.command) === run ? S.running : S.notEnded;
+    await trow([ctx.time(run.startedAt), txt(run.command), run.dryRun ? S.dryRun : S.live, runBatchText(run, T), num(run.limit), num(run.exitCode), ctx.time(run.endedAt), txt(summary)], [
       'datetime',
       'text',
       'text',
@@ -1397,92 +1453,78 @@ async function writeSummarySheet(book, ctx) {
       'text',
     ]);
   }
-  if (!runs.length) await s.add(['还没有运行记录'], NOTE);
+  if (!runs.length) await s.add([S.noRuns], NOTE);
   await s.finish();
 }
 
-/** "amazon" → "Amazon", "205641" → "Sellbrite（205641）". */
-function sourceText(source) {
-  const label = channelLabel(source);
+/** "amazon" → "Amazon", "205641" → "Sellbrite（205641）" (in the pack's words). */
+function sourceText(source, T) {
+  const label = T.channelLabel(source);
   if (!label) return String(source ?? '');
-  return label.toLowerCase() === String(source).toLowerCase() ? label : `${label}（${source}）`;
+  return label.toLowerCase() === String(source).toLowerCase() ? label : T.summary.sourceWithCode(label, source);
 }
 
-function runBatchText(run) {
+function runBatchText(run, T) {
   if (run.command === 'remind') {
     const round = run.options?.round ?? run.round;
-    return round ? `第 ${round} 次提醒` : null;
+    return round ? T.roundName(round) : null;
   }
   return Number.isInteger(run.batch) ? String(run.batch) : null;
 }
 
-// ---- 发放名单 -----------------------------------------------------------------
+// ---- 发放名单 (recipients) ---------------------------------------------------
 
-/** Column definitions of 发放名单: header, width, cell kind, help text (说明 sheet) and value. */
+/** Column definitions of the recipients sheet: header, width, cell kind, help text (help sheet) and value. */
 function recipientColumns(ctx) {
+  const { T } = ctx;
+  const C = T.recipients.columns;
+  /** Title and help of column `id`; a templated one gets `args` (the tag it names). */
+  const text = (id, ...args) => {
+    const pick = (v) => (typeof v === 'function' ? v(...args) : v);
+    return { title: pick(C[id].title), help: pick(C[id].help) };
+  };
   return [
-    { title: '序号', width: 7, kind: 'int', help: '发放顺序：有下单的人按上次下单日期从近到远，后面是从没下单的人，按注册时间从新到旧。名单生成后不再改变。', value: (x) => num(x.r.seq) },
-    { title: '状态', width: 13, kind: 'text', help: '发放状态，见“发放状态”。整行的颜色和状态对应。', value: (x) => STATUS_LABELS[x.status] ?? x.status },
-    { title: '批次', width: 6, kind: 'int', help: '第几批 issue 发放（或跳过）的这个人。', value: (x) => num(x.state?.batch) },
-    { title: '客户 ID', width: 16, kind: 'link', help: '点击打开 Shopify 后台的客户页面。', value: (x, c) => c.link('customers', x.r.customerId, x.r.numericId) },
-    { title: '姓名', width: 18, kind: 'text', help: '导出时的客户姓名。', value: (x) => txt(x.r.name) },
-    { title: '邮箱', width: 28, kind: 'text', help: '导出时的默认邮箱。', value: (x) => txt(x.r.email) },
-    { title: '营销状态', width: 10, kind: 'text', help: '导出时的邮件营销状态。', value: (x) => labelOf(MARKETING_LABELS, x.r.marketingState) || null },
-    { title: '客户类型', width: 10, kind: 'text', help: '有下单 / 从没下单 / 测试。', value: (x) => labelOf(KIND_LABELS, x.r.kind) || null },
-    {
-      title: '上次有效订单号',
-      width: 13,
-      kind: 'link',
-      help: '金额依据的订单：最近一笔未取消、非测试、付过钱的订单。点击打开订单。',
-      value: (x, c) => (x.r.basis ? c.link('orders', x.r.basis.orderId, x.r.basis.orderName) : null),
-    },
-    { title: '上次下单日期', width: 12, kind: 'date', help: '这笔订单的下单日期（店铺时间）。', value: (x, c) => (x.r.basis ? c.day(x.r.basis.createdAt) : null) },
-    {
-      title: '最近订单渠道',
-      width: 13,
-      kind: 'text',
-      help: '最近一笔有效订单（未取消、非测试，$0 也算）的来源渠道，第 9 条按它判断；没有有效订单时留空。',
-      value: (x) => txt(channelLabel(x.r.lastOrderSource)),
-    },
-    { title: '距今天数', width: 8, kind: 'int', help: '上次有效订单的下单日期到客户数据导出那天相隔的天数。', value: (x, c) => (x.r.basis ? c.daysToExport(x.r.basis.createdAt) : null) },
-    { title: '上次订单总额', width: 12, kind: 'money', help: '下单时的总价，含运费和税，不扣后来的退款。', value: (x) => (x.r.basis ? money(x.r.basis.totalCents) : null) },
-    { title: '金额算式', width: 42, kind: 'text', help: '基数 = 上次订单总额（从没下单的人用平均值）× 比例，四舍五入到分，再对档位。', value: (x) => txt(x.r.formula) },
-    { title: '档位', width: 9, kind: 'text', help: '发放金额所在的档位；测试活动显示“测试”。', value: (x, c) => c.tierText(x.r) },
-    { title: '礼品卡金额', width: 11, kind: 'money', help: '卡的面额：已建卡的按卡的金额，其余按名单金额。', value: (x) => money(x.cardCents) },
-    { title: '同地址账户数', width: 8, kind: 'int', help: '同一地址上参与去重的候选账户数（含本人）。没有可比对地址的人留空。', value: (x) => (x.r.addressKey ? num(x.r.groupSize ?? 1) : null) },
-    { title: '同地址其他账户', width: 18, kind: 'text', help: '同地址其他候选账户的客户 ID，这些账户不发。', value: (x) => (Array.isArray(x.r.groupOthers) ? txt(x.r.groupOthers.join(', ')) : txt(x.r.groupOthers)) },
-    {
-      title: `是否有 ${ctx.sentTag}`,
-      width: 14,
-      kind: 'text',
-      help:
-        `以最近一次从 Shopify 刷新 tag（export --refresh 或 verify）的结果为准：刷新时客户带 ${ctx.sentTag} 显示“是”，不带显示“否”，`
-        + '所以在后台删掉的 tag 刷新后会显示“否”。刷新之后才打上 tag 的人，按本地日志显示“是”；从没刷新过时只看本地日志。'
-        + '刷新读的是 Shopify 的搜索结果，刚打上的 tag 可能要过几分钟才查得到，所以打 tag 后 10 分钟内的刷新不会把本地日志的“是”改成“否”。',
-      value: (x, c) => (c.hasTag(x.state, x.r.customerId) ? '是' : '否'),
-    },
-    { title: '礼品卡 ID', width: 16, kind: 'link', help: '点击打开 Shopify 后台的礼品卡页面。', value: (x, c) => (x.state?.giftCardId ? c.link('gift_cards', x.state.giftCardId) : null) },
-    { title: '卡号后 4 位', width: 9, kind: 'text', help: '卡号的最后 4 位，用来和后台核对。程序从不读取完整卡号。', value: (x) => txt(x.state?.last4) },
-    { title: '建卡时间', width: 16, kind: 'datetime', help: '店铺时间。', value: (x, c) => c.time(x.state?.createdAt) },
-    { title: '打 tag 时间', width: 16, kind: 'datetime', help: '店铺时间。', value: (x, c) => c.time(x.state?.taggedAt) },
-    { title: '第 1 次提醒', width: 20, kind: 'text', help: `见“提醒状态”。这一轮的 tag 是 ${ctx.roundTag(1)}。`, value: (x, c) => c.remindText(x.state, '1'), warn: (x, c) => c.remindWarn(x.state, '1') },
-    { title: '第 2 次提醒', width: 20, kind: 'text', help: `见“提醒状态”。这一轮的 tag 是 ${ctx.roundTag(2)}。`, value: (x, c) => c.remindText(x.state, '2'), warn: (x, c) => c.remindWarn(x.state, '2') },
-    { title: '已使用金额', width: 11, kind: 'money', help: '最近一次运行 usage 时这张卡已用掉的金额。', value: (x) => (x.card ? money(x.card.usedCents) : null) },
-    { title: '剩余余额', width: 11, kind: 'money', help: '最近一次运行 usage 时这张卡的余额。', value: (x) => (x.card ? money(x.card.balanceCents) : null) },
-    { title: '使用的订单', width: 16, kind: 'text', help: '用这张卡付过款的订单号。', value: (x, c) => c.ordersText(x.card) },
-    { title: '备注/错误', width: 44, kind: 'text', help: '跳过或失败的原因、Shopify 的错误信息，以及金额依据的特殊情况。', value: (x, c) => c.notesFor(x) },
-    { title: '城市', width: 14, kind: 'text', help: '客户默认地址的城市。', value: (x) => txt(x.r.city) },
-    { title: '州', width: 6, kind: 'text', help: '客户默认地址的州。', value: (x) => txt(x.r.provinceCode) },
-    { title: '邮编', width: 9, kind: 'text', help: '客户默认地址的邮编。', value: (x) => txt(x.r.zip) },
-    { title: '订单数', width: 7, kind: 'int', help: '导出时 Shopify 记录的订单数。', value: (x) => num(x.r.numberOfOrders) },
-    { title: '累计消费', width: 12, kind: 'money', help: '导出时 Shopify 记录的累计消费。', value: (x) => money(x.r.amountSpentCents) },
-    { title: '注册日期', width: 12, kind: 'date', help: '客户账户的创建日期。', value: (x, c) => c.day(x.r.accountCreatedAt) },
+    { ...text('seq'), width: 7, kind: 'int', value: (x) => num(x.r.seq) },
+    { ...text('status'), width: 13, kind: 'text', value: (x) => T.STATUS_LABELS[x.status] ?? x.status },
+    { ...text('batch'), width: 6, kind: 'int', value: (x) => num(x.state?.batch) },
+    { ...text('customerId'), width: 16, kind: 'link', value: (x, c) => c.link('customers', x.r.customerId, x.r.numericId) },
+    { ...text('name'), width: 18, kind: 'text', value: (x) => txt(x.r.name) },
+    { ...text('email'), width: 28, kind: 'text', value: (x) => txt(x.r.email) },
+    { ...text('marketing'), width: 10, kind: 'text', value: (x) => labelOf(T.MARKETING_LABELS, x.r.marketingState) || null },
+    { ...text('kind'), width: 10, kind: 'text', value: (x) => labelOf(T.KIND_LABELS, x.r.kind) || null },
+    { ...text('basisOrder'), width: 13, kind: 'link', value: (x, c) => (x.r.basis ? c.link('orders', x.r.basis.orderId, x.r.basis.orderName) : null) },
+    { ...text('basisDate'), width: 12, kind: 'date', value: (x, c) => (x.r.basis ? c.day(x.r.basis.createdAt) : null) },
+    { ...text('channel'), width: 13, kind: 'text', value: (x) => txt(T.channelLabel(x.r.lastOrderSource)) },
+    { ...text('daysAgo'), width: 8, kind: 'int', value: (x, c) => (x.r.basis ? c.daysToExport(x.r.basis.createdAt) : null) },
+    { ...text('basisTotal'), width: 12, kind: 'money', value: (x) => (x.r.basis ? money(x.r.basis.totalCents) : null) },
+    { ...text('formula'), width: 42, kind: 'text', value: (x, c) => txt(T.stored.formula(x.r, c.selection)) },
+    { ...text('tier'), width: 9, kind: 'text', value: (x, c) => c.tierText(x.r) },
+    { ...text('amount'), width: 11, kind: 'money', value: (x) => money(x.cardCents) },
+    { ...text('groupSize'), width: 8, kind: 'int', value: (x) => (x.r.addressKey ? num(x.r.groupSize ?? 1) : null) },
+    { ...text('groupOthers'), width: 18, kind: 'text', value: (x) => (Array.isArray(x.r.groupOthers) ? txt(x.r.groupOthers.join(', ')) : txt(x.r.groupOthers)) },
+    { ...text('hasTag', ctx.sentTag), width: 14, kind: 'text', value: (x, c) => (c.hasTag(x.state, x.r.customerId) ? T.yes : T.no) },
+    { ...text('giftCardId'), width: 16, kind: 'link', value: (x, c) => (x.state?.giftCardId ? c.link('gift_cards', x.state.giftCardId) : null) },
+    { ...text('last4'), width: 9, kind: 'text', value: (x) => txt(x.state?.last4) },
+    { ...text('createdAt'), width: 16, kind: 'datetime', value: (x, c) => c.time(x.state?.createdAt) },
+    { ...text('taggedAt'), width: 16, kind: 'datetime', value: (x, c) => c.time(x.state?.taggedAt) },
+    { ...text('remind1', ctx.roundTag(1)), width: 20, kind: 'text', value: (x, c) => c.remindText(x.state, '1'), warn: (x, c) => c.remindWarn(x.state, '1') },
+    { ...text('remind2', ctx.roundTag(2)), width: 20, kind: 'text', value: (x, c) => c.remindText(x.state, '2'), warn: (x, c) => c.remindWarn(x.state, '2') },
+    { ...text('usedAmount'), width: 11, kind: 'money', value: (x) => (x.card ? money(x.card.usedCents) : null) },
+    { ...text('balance'), width: 11, kind: 'money', value: (x) => (x.card ? money(x.card.balanceCents) : null) },
+    { ...text('usedOrders'), width: 16, kind: 'text', value: (x, c) => c.ordersText(x.card) },
+    { ...text('notes'), width: 44, kind: 'text', value: (x, c) => c.notesFor(x) },
+    { ...text('city'), width: 14, kind: 'text', value: (x) => txt(x.r.city) },
+    { ...text('province'), width: 6, kind: 'text', value: (x) => txt(x.r.provinceCode) },
+    { ...text('zip'), width: 9, kind: 'text', value: (x) => txt(x.r.zip) },
+    { ...text('orderCount'), width: 7, kind: 'int', value: (x) => num(x.r.numberOfOrders) },
+    { ...text('amountSpent'), width: 12, kind: 'money', value: (x) => money(x.r.amountSpentCents) },
+    { ...text('accountCreated'), width: 12, kind: 'date', value: (x, c) => c.day(x.r.accountCreatedAt) },
   ];
 }
 
 async function writeRecipientsSheet(book, ctx) {
   const columns = recipientColumns(ctx);
-  const s = book.sheet('发放名单', { widths: columns.map((c) => c.width), freezeRows: 1, freezeCols: 3 });
+  const s = book.sheet(ctx.T.sheets.recipients, { widths: columns.map((c) => c.width), freezeRows: 1, freezeCols: 3 });
   const header = await s.header(columns.map((c) => c.title));
   const byStatus = new Map(); // status → [style per column]
   const stylesFor = (status) => {
@@ -1506,22 +1548,24 @@ async function writeRecipientsSheet(book, ctx) {
   await s.finish();
 }
 
-// ---- 未入选 ------------------------------------------------------------------
+// ---- 未入选 (not selected) ---------------------------------------------------
 
 async function writeNotSelectedSheet(book, ctx) {
-  const titles = ['客户 ID', '姓名', '邮箱', '营销状态', '主要原因', '全部原因', '上次下单日期', '订单数', '相关账户', '组号', 'tags'];
-  const s = book.sheet('未入选', { widths: [16, 18, 28, 10, 38, 56, 12, 7, 16, 8, 30] });
+  const { T } = ctx;
+  const titles = T.notSelected.header;
+  const s = book.sheet(T.sheets.notSelected, { widths: [16, 18, 28, 10, 38, 56, 12, 7, 16, 8, 30] });
   const header = await s.header(titles);
   const rowStyles = ['link', 'text', 'text', 'text', 'text', 'text', 'date', 'int', 'link', 'text', 'text'].map((k) => cellStyle(k));
+  const info = { params: ctx.params, timeZone: ctx.timeZone };
   for (const n of ctx.notSelected) {
     await s.add(
       [
         ctx.link('customers', n.customerId, n.numericId),
         txt(n.name),
         txt(n.email),
-        labelOf(MARKETING_LABELS, n.marketingState) || null,
-        txt(n.primaryText),
-        txt(n.allReasons),
+        labelOf(T.MARKETING_LABELS, n.marketingState) || null,
+        txt(T.stored.primaryReason(n, info)),
+        txt(T.stored.allReasons(n, info)),
         ctx.day(n.lastOrderAt),
         num(n.numberOfOrders),
         n.relatedCustomerId ? ctx.link('customers', n.relatedCustomerId) : null,
@@ -1535,12 +1579,14 @@ async function writeNotSelectedSheet(book, ctx) {
   await s.finish();
 }
 
-// ---- 同地址重复 ----------------------------------------------------------------
+// ---- 同地址重复 (same address) -------------------------------------------------
 
 async function writeDuplicatesSheet(book, ctx) {
-  const titles = ['组号', '组内账户数', '规范化地址', '是否保留', '客户 ID', '姓名', '邮箱', '上次付费下单日期', '订单数', '注册日期', '疑似批量注册'];
+  const { T } = ctx;
+  const D = T.duplicates;
+  const titles = D.header;
   const kinds = ['text', 'int', 'text', 'text', 'link', 'text', 'text', 'date', 'int', 'date', 'text'];
-  const s = book.sheet('同地址重复', { widths: [15, 12, 40, 16, 18, 18, 28, 14, 8, 12, 12] });
+  const s = book.sheet(T.sheets.duplicates, { widths: [15, 12, 40, 16, 18, 18, 28, 14, 8, 12, 12] });
   const header = await s.header(titles);
   const banded = [kinds.map((k) => cellStyle(k)), kinds.map((k) => cellStyle(k, COLOR.band))];
   let group = 0;
@@ -1553,14 +1599,14 @@ async function writeDuplicatesSheet(book, ctx) {
           txt(g.groupId),
           num(g.size),
           txt(g.address),
-          m.kept ? '保留' : '不发',
+          m.kept ? D.kept : D.notSent,
           ctx.link('customers', m.customerId, m.numericId),
           txt(m.name),
           txt(m.email),
           ctx.day(m.lastPaidOrderAt),
           num(m.numberOfOrders),
           ctx.day(m.accountCreatedAt),
-          g.flaggedBulk ? '是' : null,
+          g.flaggedBulk ? T.yes : null,
         ],
         rowStyles,
       );
@@ -1572,8 +1618,8 @@ async function writeDuplicatesSheet(book, ctx) {
   const active = ctx.notSelected.filter((n) => n.primaryCode === 'active-address');
   await s.blank();
   await s.blank();
-  await s.add([`因同地址账户近 ${ctx.inactiveMonths} 个月下过单而不发的人（${fmtCount(active.length)} 人）`], SECTION, { height: 22 });
-  await s.header(['客户 ID', '姓名', '邮箱', '活跃账户', '活跃账户下单时间']);
+  await s.add([D.activeTitle(ctx.inactiveMonths, fmtCount(active.length))], SECTION, { height: 22 });
+  await s.header(D.activeHeader);
   const activeStyles = ['link', 'text', 'text', 'link', 'datetime'].map((k) => cellStyle(k));
   for (const n of active) {
     await s.add(
@@ -1590,18 +1636,20 @@ async function writeDuplicatesSheet(book, ctx) {
   await s.finish();
 }
 
-// ---- 使用明细 ------------------------------------------------------------------
+// ---- 使用明细 (usage details) ------------------------------------------------
 
-function itemsText(lineItems) {
+function itemsText(lineItems, T) {
   const items = objects(lineItems);
   if (!items.length) return null;
-  return txt(items.map((l) => `${l.name ?? ''} × ${l.quantity ?? 1}`).join('; '));
+  return txt(items.map((l) => `${T.stored.productName(l.name ?? '')} × ${l.quantity ?? 1}`).join('; '));
 }
 
 async function writeUsageDetailSheet(book, ctx) {
+  const { T } = ctx;
+  const D = T.usageDetail;
   const u = ctx.usage;
-  const s = book.sheet('使用明细', { widths: [12, 17, 16, 17, 12, 14, 12, 8, 60] });
-  const titles = ['订单号', '下单时间', '客户 ID', '卡号后 4 位', '卡面额', '本单用卡金额', '订单总额', '已取消', '买了什么'];
+  const s = book.sheet(T.sheets.usageDetail, { widths: [12, 17, 16, 17, 12, 14, 12, 8, 60] });
+  const titles = D.header;
   const header = await s.header(titles);
   const rowStyles = ['link', 'datetime', 'link', 'text', 'money', 'money', 'money', 'text', 'text'].map((k) => cellStyle(k));
   const payments = objects(u.payments)
@@ -1620,8 +1668,8 @@ async function writeUsageDetailSheet(book, ctx) {
         money(card?.initialCents),
         money(p.netCents ?? p.amountCents),
         money(order?.totalCents),
-        order?.cancelled ? '是' : null,
-        itemsText(order?.lineItems),
+        order?.cancelled ? T.yes : null,
+        itemsText(order?.lineItems, T),
       ],
       rowStyles,
     );
@@ -1632,10 +1680,10 @@ async function writeUsageDetailSheet(book, ctx) {
   await s.blank();
   await s.blank();
   if (!unmatched.length) {
-    await s.add(['没有需要人工核对的礼品卡付款'], NOTE);
+    await s.add([D.noUnmatched], NOTE);
   } else {
-    await s.add([`需要人工核对的礼品卡付款：回执里没有本活动礼品卡 ID（${fmtCount(unmatched.length)} 笔）`], SECTION, { height: 22 });
-    await s.header(['订单号', '下单时间', '客户 ID', '付款时间', '金额', '原因']);
+    await s.add([D.unmatchedTitle(fmtCount(unmatched.length))], SECTION, { height: 22 });
+    await s.header(D.unmatchedHeader);
     const unmatchedStyles = ['link', 'datetime', 'link', 'datetime', 'money', 'text'].map((k) => cellStyle(k));
     for (const m of unmatched) {
       await s.add(
@@ -1645,7 +1693,7 @@ async function writeUsageDetailSheet(book, ctx) {
           ctx.link('customers', m.customerId),
           ctx.time(m.processedAt),
           money(m.amountCents),
-          txt(labelOf(UNMATCHED_REASON_LABELS, m.reason)),
+          txt(storedLabelOf(T.UNMATCHED_REASON_LABELS, m.reason, T)),
         ],
         unmatchedStyles,
       );
@@ -1654,30 +1702,32 @@ async function writeUsageDetailSheet(book, ctx) {
   await s.finish();
 }
 
-// ---- 核对 ---------------------------------------------------------------------
+// ---- 核对 (verify) -------------------------------------------------------------
 
 async function writeVerifySheet(book, ctx) {
+  const { T } = ctx;
+  const V = T.verify;
   const v = ctx.verify;
   const issues = objects(v.issues);
-  const s = book.sheet('核对', { widths: [30, 16, 16, 36, 36, 46], freezeRows: 3 });
-  await s.add([`核对时间 ${ctx.stamp(v.verifiedAt) || '未知'}（${ctx.tzLabel}）；本活动的卡 ${fmtCount(v.cardCount)} 张；带 ${ctx.sentTag} 的客户 ${fmtCount(v.taggedCount)} 个`], SECTION, { height: 22 });
+  const s = book.sheet(T.sheets.verify, { widths: [30, 16, 16, 36, 36, 46], freezeRows: 3 });
+  await s.add([V.title(ctx.stamp(v.verifiedAt) || V.unknownTime, ctx.tzLabel, fmtCount(v.cardCount), ctx.sentTag, fmtCount(v.taggedCount))], SECTION, { height: 22 });
   const counts = Object.entries(v.counts ?? {})
     .filter(([, n]) => n > 0)
-    .map(([type, n]) => `${labelOf(VERIFY_TYPE_LABELS, type)} ${fmtCount(n)}`)
-    .join('；');
-  await s.add([issues.length ? `发现 ${fmtCount(issues.length)} 个问题${counts ? `：${counts}` : ''}` : '没有发现问题'], NOTE);
-  const titles = ['问题类型', '客户 ID', '礼品卡 ID', '日志记录', 'Shopify 实际', '建议操作'];
+    .map(([type, n]) => V.countItem(labelOf(T.VERIFY_TYPE_LABELS, type), fmtCount(n)))
+    .join(T.sep.list);
+  await s.add([issues.length ? V.found(fmtCount(issues.length), counts) : V.none], NOTE);
+  const titles = V.header;
   const header = await s.header(titles);
   const rowStyles = ['text', 'link', 'link', 'text', 'text', 'text'].map((k) => cellStyle(k));
   for (const i of issues) {
     await s.add(
       [
-        txt(labelOf(VERIFY_TYPE_LABELS, i.type)),
+        txt(labelOf(T.VERIFY_TYPE_LABELS, i.type)),
         i.customerId ? ctx.link('customers', i.customerId) : null,
         i.giftCardId ? ctx.link('gift_cards', i.giftCardId) : null,
-        txt(i.journal),
-        txt(i.shopify),
-        txt(i.action),
+        txt(T.stored.verify(i, 'journal')),
+        txt(T.stored.verify(i, 'shopify')),
+        txt(T.stored.verify(i, 'action')),
       ],
       rowStyles,
     );
@@ -1686,48 +1736,51 @@ async function writeVerifySheet(book, ctx) {
   await s.finish();
 }
 
-// ---- 操作日志 -----------------------------------------------------------------
+// ---- 操作日志 (activity log) ---------------------------------------------------
 
 /**
  * "结果/说明" of one journal entry. Skip details are made readable: times in
- * store time, customers by number, marketing states in Chinese (ctx.stamp is
+ * store time, customers by number, marketing states by label (ctx.stamp is
  * the workbook's store-local clock).
  */
 function entryResult(e, ctx) {
-  const amount = Number.isInteger(e.amountCents) ? `金额 ${formatUsd(e.amountCents)}` : '';
-  const last4 = e.last4 ? `卡号后 4 位 ${e.last4}` : '';
+  const { T } = ctx;
+  const J = T.journal;
+  const amount = Number.isInteger(e.amountCents) ? J.amount(formatUsd(e.amountCents)) : '';
+  const last4 = e.last4 ? J.last4(e.last4) : '';
   const detail = { stamp: ctx.stamp };
   switch (e.op) {
     case 'create.start':
       return amount;
     case 'create.ok':
-      return [amount, last4].filter(Boolean).join('，');
+      return [amount, last4].filter(Boolean).join(T.sep.comma);
     case 'reconcile.found':
-      return [labelOf(RECONCILE_SOURCE_LABELS, e.source), amount, last4].filter(Boolean).join('，');
+      return [labelOf(T.RECONCILE_SOURCE_LABELS, e.source), amount, last4].filter(Boolean).join(T.sep.comma);
     case 'skip':
-      return issueSkipText(e.reason, e.detail, detail);
+      return issueSkipText(e.reason, e.detail, detail, T);
     case 'remind.skip':
-      return remindSkipText(e.reason, e.detail, detail);
+      return remindSkipText(e.reason, e.detail, detail, T);
     case 'remind.start':
-      return e.retry ? '重新发送（之前失败或结果不明）' : noteText(e.note);
+      return e.retry ? J.retry : noteText(e.note, T);
     case 'remind.found':
-      return `Shopify 上已带 ${ctx.roundTag(e.round) ?? '本轮 tag'}`;
+      return J.alreadyTagged(ctx.roundTag(e.round) ?? J.roundTagFallback);
     case 'remind.tag.fail':
-      return `${ctx.roundTag(e.round) ?? '本轮 tag'} 没打上，下次运行会补打`;
+      return J.tagMissing(ctx.roundTag(e.round) ?? J.roundTagFallback);
     case 'remind.tag.ok': {
       // the repair: the tag added again, or (note) already in Shopify although its tagsAdd looked failed
-      const tag = ctx.roundTag(e.round) ?? '本轮 tag';
-      if (e.note === 'already tagged in Shopify') return `Shopify 上已带 ${tag}`;
-      return e.note ? noteText(e.note) : `已补打 ${tag}`;
+      const tag = ctx.roundTag(e.round) ?? J.roundTagFallback;
+      if (e.note === 'already tagged in Shopify') return J.alreadyTagged(tag);
+      return e.note ? noteText(e.note, T) : J.tagRepaired(tag);
     }
     default:
-      return noteText(e.note);
+      return noteText(e.note, T);
   }
 }
 
 async function writeJournalSheet(book, ctx) {
-  const titles = ['时间', '命令', '批次/轮次', '客户 ID', '动作', '结果/说明', '礼品卡 ID', '错误'];
-  const s = book.sheet('操作日志', { widths: [16, 9, 12, 16, 18, 44, 16, 44] });
+  const { T } = ctx;
+  const titles = T.journal.header;
+  const s = book.sheet(T.sheets.journal, { widths: [16, 9, 12, 16, 18, 44, 16, 44] });
   const header = await s.header(titles);
   const rowStyles = ['datetime', 'text', 'text', 'text', 'text', 'text', 'text', 'warn'].map((k) => cellStyle(k));
   for (const e of ctx.entries) {
@@ -1735,7 +1788,7 @@ async function writeJournalSheet(book, ctx) {
     const run = ctx.runsById.get(e.run);
     const isRemind = e.op.startsWith('remind.');
     let batch = null;
-    if (isRemind) batch = e.round !== undefined && e.round !== null ? `第 ${e.round} 次提醒` : null;
+    if (isRemind) batch = e.round !== undefined && e.round !== null ? T.roundName(e.round) : null;
     else if (Number.isInteger(e.batch ?? run?.batch)) batch = String(e.batch ?? run.batch);
     // Entries whose run.start is missing: the op itself tells remind and issue
     // apart; reconcile.* can also come from verify, so it stays blank.
@@ -1746,10 +1799,10 @@ async function writeJournalSheet(book, ctx) {
         txt(command),
         batch,
         txt(numericId(e.cid) || e.cid),
-        labelOf(OP_LABELS, e.op),
+        labelOf(T.OP_LABELS, e.op),
         txt(entryResult(e, ctx)),
         txt(numericId(e.giftCardId)),
-        txt(errorText(e.error)),
+        txt(errorText(e.error, T)),
       ],
       rowStyles,
     );
@@ -1758,10 +1811,12 @@ async function writeJournalSheet(book, ctx) {
   await s.finish();
 }
 
-// ---- 说明 ---------------------------------------------------------------------
+// ---- 说明 (help) ---------------------------------------------------------------
 
 async function writeHelpSheet(book, ctx) {
-  const s = book.sheet('说明', { widths: [30, 120] });
+  const { T } = ctx;
+  const H = T.help;
+  const s = book.sheet(T.sheets.help, { widths: [30, 120] });
   const item = cellStyle('text');
   const section = async (title) => {
     await s.blank();
@@ -1770,62 +1825,52 @@ async function writeHelpSheet(book, ctx) {
   const rows = async (pairs) => {
     for (const [k, v] of pairs) await s.add([txt(k), txt(v)], [item, item]);
   };
-  await s.header(['项目', '说明']);
+  await s.header(H.header);
 
-  await section('各表说明');
-  await rows([
-    ['使用报告', '运行 usage 后出现，排在第一张：发出多少卡、用了多少、带来多少订单和金额、按档位和客户类型的使用率、每日趋势、卖得最多的商品。'],
-    ['汇总', '活动参数、筛选漏斗、金额、发放进度、提醒、使用情况和运行记录。'],
-    ['发放名单', '每个入选者一行，按发放顺序（序号）。整行颜色表示发放状态。前 3 列和表头冻结。'],
-    ['未入选', '被排除的人和原因。只因第 1–3 条（没邮箱、平台中转或占位邮箱、未订阅营销邮件）被排除的人不逐行列出，只在“汇总”里计数。'],
-    ['同地址重复', '同一地址的多个候选账户只保留一个（按组着色）；下面另列因同地址账户近期下过单而不发的人。'],
-    ['使用明细', '运行 usage 后出现：每笔用本活动礼品卡付款一行；下面另列回执里没有礼品卡 ID、需要人工核对的付款。'],
-    ['核对', '运行 verify 后出现：本地日志和 Shopify 对不上的地方，以及建议操作。'],
-    ['操作日志', '每次写操作的记录（建卡、打 tag、跳过、提醒），按时间顺序。发提醒后直接打上本轮 tag 的不单独记一行，见“补打本轮 tag”。'],
-    ['说明', '本页。'],
-  ]);
+  await section(H.sheetsSection);
+  await rows(H.sheets);
 
-  await section('发放名单各列');
+  await section(H.columnsSection);
   await rows(recipientColumns(ctx).map((c) => [c.title, c.help]));
 
-  await section('发放状态（发放名单“状态”列和整行颜色）');
+  await section(H.statusSection);
   for (const status of STATUS_ORDER) {
-    await s.add([STATUS_LABELS[status], STATUS_HELP[status]], [cellStyle('text', STATUS_FILLS[status] ?? null), item]);
+    await s.add([T.STATUS_LABELS[status], T.STATUS_HELP[status]], [cellStyle('text', STATUS_FILLS[status] ?? null), item]);
   }
 
-  await section('提醒状态（“第 1 次提醒”“第 2 次提醒”两列）');
-  await rows(REMIND_HELP);
+  await section(H.remindSection);
+  await rows(T.REMIND_HELP);
   await rows([
-    ['提醒跳过的原因', Object.values(REMIND_SKIP_LABELS).join('、')],
-    ['发放前跳过的原因', Object.values(ISSUE_SKIP_LABELS).join('、')],
+    [H.remindSkipReasons, Object.values(T.REMIND_SKIP_LABELS).join(T.sep.enum)],
+    [H.issueSkipReasons, Object.values(T.ISSUE_SKIP_LABELS).join(T.sep.enum)],
   ]);
 
-  await section('本轮 tag（每一轮每人最多一封提醒）');
-  await rows(roundTagHelp(ctx.sentTag));
+  await section(H.roundTagSection);
+  await rows(roundTagHelp(ctx.sentTag, T));
 
-  await section('金额规则');
+  await section(H.amountSection);
   const percent = ctx.params.giftPercent ?? ctx.config.giftPercent;
   if (ctx.isTest) {
-    await rows([['测试活动', `每人固定 ${formatUsd(ctx.params.testGiftAmountCents ?? ctx.rows[0]?.r.amountCents)}，不按档位。`]]);
+    await rows([[H.testCampaign, H.testAmount(formatUsd(ctx.params.testGiftAmountCents ?? ctx.rows[0]?.r.amountCents))]]);
   } else {
     await rows([
-      ['基数', `有下单的人：上次有效订单总额 × ${percent}%，四舍五入到分。上次有效订单是最近一笔未取消、非测试、付过钱的订单；最近一笔已取消、是测试订单或是 $0，就继续往前找。`],
-      ['从没下单的人', `平均值 × ${percent}%：平均值是本次所有“有下单”入选者上次订单总额的平均数（先四舍五入到分）。订单都已取消或都是 $0 的人也按从没下单处理。`],
-      ...(ctx.tiersCents.length ? describeTiers(ctx.tiersCents).map((t, i) => [`档位 ${i + 1}`, `基数 ${t}`]) : []),
-      ['先四舍五入再对档位', '例：上次订单 $107.74 → 基数 $10.77 → 档位 $10.77；$107.75 → 基数 $10.78 → 档位 $15.33。'],
+      [H.base, H.baseText(percent)],
+      [H.never, H.neverText(percent)],
+      ...(ctx.tiersCents.length ? T.describeTiers(ctx.tiersCents).map((t, i) => H.tierRow(i, t)) : []),
+      [H.roundFirst, H.roundFirstText],
     ]);
   }
 
-  await section('使用情况的金额（“使用报告”和“汇总”）');
-  await rows([['礼品卡抵扣和已用金额', USAGE_SPLIT_NOTE]]);
+  await section(H.usageSection);
+  await rows([[H.usageAmounts, T.USAGE_SPLIT_NOTE]]);
 
-  await section('其他');
+  await section(H.otherSection);
   await rows([
-    ['时间', `所有时间都是店铺时区（${ctx.timeZone}，${ctx.tzLabel}）。`],
-    ['链接', '客户 ID、订单号、礼品卡 ID 可以点击，打开 Shopify 后台对应的页面。'],
-    ['只读', '本文件由程序生成，每次运行命令都会重新生成；手动修改会被覆盖，程序也从不读取这份 Excel。'],
-    ['筛选', '表格已加保护（无密码），可以使用筛选和调整列宽。'],
-    ...EXIT_CODE_HELP.map(([code, text]) => [`退出码 ${code}`, text]),
+    [H.time, H.timeText(ctx.timeZone, ctx.tzLabel)],
+    [H.links, H.linksText],
+    [H.readOnly, H.readOnlyText],
+    [H.filter, H.filterText],
+    ...T.EXIT_CODE_HELP.map(([code, text]) => [H.exitCode(code), text]),
   ]);
   await s.finish();
 }

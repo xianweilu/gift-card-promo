@@ -126,7 +126,7 @@ async function remind(ctx, opts = {}) {
     },
     writeReport: async (args) => {
       reports.push(args);
-      return { file: ctx.paths.excel, out: null, warnings: [] };
+      return { file: ctx.paths.excel, fileEn: ctx.paths.excelEn, out: null, outEn: null, warnings: [] };
     },
     renderPreview: async (args) => {
       previews.push(args);
@@ -1045,12 +1045,30 @@ test('warnings of the Excel report are printed once: writeReport logs them itsel
   const res = await remind(ctx, {
     writeReport: async ({ log }) => {
       log.warn(warning);
-      return { file: ctx.paths.excel, out: null, warnings: [warning] };
+      return { file: ctx.paths.excel, fileEn: ctx.paths.excelEn, out: null, outEn: null, warnings: [warning] };
     },
   });
   assert.equal(res.exitCode, 0);
   assert.equal(res.log.lines.filter((l) => l.includes(warning)).length, 1);
   assert.match(logText(res), /Excel 已更新：/);
+  // The English edition's path follows the Chinese one.
+  const excelAt = res.log.lines.indexOf(`INFO Excel 已更新：${ctx.paths.excel}`);
+  assert.ok(excelAt >= 0, logText(res));
+  assert.equal(res.log.lines[excelAt + 1], `INFO 英文版 Excel 已更新：${ctx.paths.excelEn}`, logText(res));
+});
+
+test('when the English workbook failed (fileEn null) remind prints no English path and keeps its exit code', async () => {
+  const ctx = await issuedCampaign({ count: 1 });
+  const res = await remind(ctx, {
+    writeReport: async ({ log }) => {
+      log.warn('英文版 Excel 没有生成：disk full');
+      return { file: ctx.paths.excel, fileEn: null, out: null, outEn: null, warnings: ['英文版 Excel 没有生成：disk full'] };
+    },
+  });
+  assert.equal(res.exitCode, 0);
+  assert.ok(res.log.lines.includes(`INFO Excel 已更新：${ctx.paths.excel}`), logText(res));
+  assert.equal(res.log.lines.filter((l) => l.includes('英文版 Excel 已更新')).length, 0, logText(res));
+  assert.equal(res.log.lines.filter((l) => l === 'WARN 英文版 Excel 没有生成：disk full').length, 1, 'printed once, by writeReport');
 });
 
 // ---------------------------------------------------------------------------

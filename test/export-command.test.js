@@ -8,7 +8,7 @@ import { testConfig, selectionFixture, makeCustomer, makeOrder, memoryLog, gid }
 import { campaignPaths, readJson, acquireRunLock, runningCommand } from '../src/campaign.js';
 import { resetClient } from '../src/shopify.js';
 import { runExport, resolveOutPath, compareGids, missingSelectionMessage } from '../src/export-command.js';
-import { OPEN_IN_EXCEL_WARNING } from '../src/report/excel.js';
+import { OPEN_IN_EXCEL_WARNING, englishWorkbookPath } from '../src/report/excel.js';
 
 const NOW = '2026-10-05T18:00:00.000Z';
 const now = () => new Date(NOW);
@@ -20,19 +20,25 @@ function customers(count) {
 
 /**
  * writeReport stand-in: records its arguments and behaves like the real one: each
- * warning is logged through args.log when it happens and also returned in `warnings`.
- * `copyFails` simulates a --out copy that could not be saved (a warning, out: null).
+ * warning is logged through args.log when it happens and also returned in `warnings`;
+ * the English edition (fileEn) and its --out copy ("<name>-en.xlsx", outEn) come with
+ * the Chinese ones. `copyFails` simulates a --out copy that could not be saved (a
+ * warning, out: null); `englishFails` an English edition that was not written (a
+ * warning, fileEn / outEn null).
  */
-function reportStub({ fail = null, warnings = [], onCall = null, copyFails = null } = {}) {
+function reportStub({ fail = null, warnings = [], onCall = null, copyFails = null, englishFails = null } = {}) {
   const calls = [];
   const fn = async (args) => {
     calls.push(args);
     if (onCall) onCall(args);
     if (fail) throw new Error(fail);
     const all = [...warnings];
+    if (englishFails) all.push(`英文版 Excel 没有生成：${englishFails}`);
     if (args.out && copyFails) all.push(`另存 Excel 到 ${args.out} 失败：${copyFails}`);
     for (const w of all) args.log.warn(w);
-    return { file: args.paths.excel, out: args.out && !copyFails ? args.out : null, warnings: all };
+    const fileEn = englishFails ? null : args.paths.excelEn;
+    const out = args.out && !copyFails ? args.out : null;
+    return { file: args.paths.excel, fileEn, out, outEn: out && fileEn ? englishWorkbookPath(out) : null, warnings: all };
   };
   fn.calls = calls;
   return fn;
@@ -125,6 +131,9 @@ test('exports from local data only: no Shopify call, no journal write, path prin
 
   assert.equal(result.exitCode, 0);
   assert.equal(result.file, paths.excel);
+  assert.equal(result.fileEn, paths.excelEn);
+  assert.equal(result.out, null);
+  assert.equal(result.outEn, null);
   assert.deepEqual(result.warnings, ['Excel 正打开此文件，请关闭后重新打开才能看到最新内容']);
   assert.equal(writeReport.calls.length, 1);
   const args = writeReport.calls[0];
@@ -134,6 +143,9 @@ test('exports from local data only: no Shopify call, no journal write, path prin
   assert.equal(args.now, now);
   assert.equal(args.log, log);
   assert.ok(log.lines.includes(`INFO Excel 已导出：${paths.excel}`), log.lines.join('\n'));
+  // The English edition's path follows the Chinese one.
+  const excelAt = log.lines.indexOf(`INFO Excel 已导出：${paths.excel}`);
+  assert.equal(log.lines[excelAt + 1], `INFO 英文版 Excel 已导出：${paths.excelEn}`, log.lines.join('\n'));
   // writeReport printed it; export does not print result.warnings a second time.
   assert.equal(log.lines.filter((l) => l === 'WARN Excel 正打开此文件，请关闭后重新打开才能看到最新内容').length, 1, log.lines.join('\n'));
   assert.equal(fake.state.calls.token.length, 0);
@@ -200,6 +212,11 @@ test('--out is resolved and passed through to writeReport', async () => {
   assert.equal(writeReport.calls[0].out, file);
   assert.equal(result.out, file);
   assert.ok(log.lines.includes(`INFO 另存一份：${file}`), log.lines.join('\n'));
+  // The English copy ("<name>-en.xlsx") is printed right after the Chinese copy.
+  const fileEn = path.join(dir, 'copy-en.xlsx');
+  assert.equal(result.outEn, fileEn);
+  const copyAt = log.lines.indexOf(`INFO 另存一份：${file}`);
+  assert.equal(log.lines[copyAt + 1], `INFO 英文版另存一份：${fileEn}`, log.lines.join('\n'));
 
   // A folder: the workbook's own name is used.
   writeReport = reportStub();
@@ -301,7 +318,31 @@ test('the --out copy could not be saved: exit 1, but the main workbook is report
   assert.equal(log.lines.filter((l) => l.startsWith('WARN 另存 Excel 到')).length, 1, 'the warning is printed once');
   assert.ok(log.lines.includes(`ERROR 没有另存到 ${target}（原因见上面的提示）；主 Excel 已更新：${paths.excel}`), log.lines.join('\n'));
   assert.equal(log.lines.some((l) => l.startsWith('INFO 另存一份')), false);
+  assert.equal(log.lines.some((l) => l.startsWith('INFO 英文版另存一份')), false);
   assert.equal(log.lines.some((l) => l.includes('导出 Excel 失败')), false, 'the main workbook did not fail');
+});
+
+test('the English workbook could not be written: only a warning (printed once), no English paths, exit 0', async () => {
+  const { config, paths } = await withSelection();
+  fake = installFakeShopify();
+  const target = path.join(tempDir(), 'copy.xlsx');
+  const log = memoryLog();
+  const writeReport = reportStub({ englishFails: 'disk full' });
+
+  const result = await runExport({ config, out: target, log, now, writeReport });
+
+  assert.equal(result.exitCode, 0, log.lines.join('\n'));
+  assert.equal(result.file, paths.excel);
+  assert.equal(result.fileEn, null);
+  assert.equal(result.out, target);
+  assert.equal(result.outEn, null);
+  assert.deepEqual(result.warnings, ['英文版 Excel 没有生成：disk full']);
+  assert.equal(log.lines.filter((l) => l === 'WARN 英文版 Excel 没有生成：disk full').length, 1, log.lines.join('\n'));
+  assert.ok(log.lines.includes(`INFO Excel 已导出：${paths.excel}`), log.lines.join('\n'));
+  assert.ok(log.lines.includes(`INFO 另存一份：${target}`), log.lines.join('\n'));
+  assert.equal(log.lines.some((l) => l.includes('英文版 Excel 已导出')), false, log.lines.join('\n'));
+  assert.equal(log.lines.some((l) => l.includes('英文版另存一份')), false, log.lines.join('\n'));
+  assert.equal(log.lines.some((l) => l.startsWith('ERROR')), false);
 });
 
 test('--out naming the main workbook itself is not a failed copy', async () => {
@@ -331,8 +372,14 @@ test('with the real Excel writer, "Excel 正打开此文件" is printed exactly 
   assert.ok(fs.existsSync(paths.excel));
   assert.equal(log.lines.filter((l) => l === `WARN ${OPEN_IN_EXCEL_WARNING}`).length, 1, log.lines.join('\n'));
   assert.deepEqual(result.warnings, [OPEN_IN_EXCEL_WARNING]);
+  // The English edition is written too, and its path follows the Chinese one.
+  assert.equal(result.fileEn, paths.excelEn);
+  assert.ok(fs.existsSync(paths.excelEn), log.lines.join('\n'));
+  const excelAt = log.lines.indexOf(`INFO Excel 已导出：${paths.excel}`);
+  assert.ok(excelAt >= 0, log.lines.join('\n'));
+  assert.equal(log.lines[excelAt + 1], `INFO 英文版 Excel 已导出：${paths.excelEn}`, log.lines.join('\n'));
 
-  // The copy is fine: exit 0 and both paths printed.
+  // The copy is fine: exit 0 and all four paths printed; the English copy sits next to the Chinese one.
   const dir = tempDir();
   const copyLog = memoryLog();
   const copy = await runExport({ config, out: dir, log: copyLog, now });
@@ -340,6 +387,10 @@ test('with the real Excel writer, "Excel 正打开此文件" is printed exactly 
   assert.equal(copy.out, path.join(dir, path.basename(paths.excel)));
   assert.ok(fs.existsSync(copy.out));
   assert.ok(copyLog.lines.includes(`INFO 另存一份：${copy.out}`), copyLog.lines.join('\n'));
+  assert.equal(copy.outEn, path.join(dir, path.basename(paths.excelEn)));
+  assert.ok(fs.existsSync(copy.outEn), copyLog.lines.join('\n'));
+  const copyAt = copyLog.lines.indexOf(`INFO 另存一份：${copy.out}`);
+  assert.equal(copyLog.lines[copyAt + 1], `INFO 英文版另存一份：${copy.outEn}`, copyLog.lines.join('\n'));
   assert.equal(copyLog.lines.filter((l) => l === `WARN ${OPEN_IN_EXCEL_WARNING}`).length, 1, copyLog.lines.join('\n'));
 });
 

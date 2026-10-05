@@ -480,6 +480,9 @@ export function summarize({ total, recipients, excluded, duplicates, averageCent
       primaryCode: primary.code,
       primaryText: reasonText(primary, config, timezone),
       allReasons: e.reasons.map((r) => reasonText(r, config, timezone)).join('；'),
+      // The same reasons as data (rule number, code, raw detail), so the English workbook
+      // can render them without parsing the Chinese texts above.
+      reasons: e.reasons.map((r) => ({ n: RULE[r.code].n, code: r.code, ...(r.detail ? { detail: r.detail } : {}) })),
       relatedCustomerId: ['active-address', 'duplicate-address'].includes(primary.code) ? primary.detail : '',
       relatedAt: primary.at ?? '',
       groupId: e.groupId ?? '',

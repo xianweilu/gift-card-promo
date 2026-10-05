@@ -291,6 +291,8 @@ export async function runIssue({
     try {
       const report = await writeReport({ config, paths, log, now });
       if (report?.file) log.info(`Excel 已更新：${report.file}`);
+      // fileEn is null when the English edition failed: writeReport already logged that warning.
+      if (report?.fileEn) log.info(`英文版 Excel 已更新：${report.fileEn}`);
     } catch (err) {
       log.warn(`Excel 没有更新：${err.message}（可以稍后运行 export 重新生成）`);
     }

@@ -324,6 +324,8 @@ async function refreshExcel(write, options, log) {
   try {
     const result = await write(options);
     if (result?.file) log.info(`Excel 已更新：${result.file}`);
+    // fileEn is null when the English edition failed: writeReport already logged that warning.
+    if (result?.fileEn) log.info(`英文版 Excel 已更新：${result.fileEn}`);
   } catch (err) {
     log.warn(`Excel 没有更新：${err.message}（可以稍后运行 node index.js export 重新生成）`);
   }

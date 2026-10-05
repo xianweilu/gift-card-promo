@@ -4,8 +4,6 @@ import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync, execFileSync } from 'node:child_process';
-import { createRequire } from 'node:module';
 import ExcelJS from 'exceljs';
 
 import { writeReport, statusLabel, remindLabel, adminUrl, effectiveStatus, numericId, OPEN_IN_EXCEL_WARNING } from '../src/report/excel.js';
@@ -20,6 +18,8 @@ import { installFakeShopify } from './fake-shopify.js';
 import { buildTestSelection, selectionParams } from '../src/select/selection.js';
 import { parseCustomer } from '../src/select/rules.js';
 import { testConfig, selectionFixture, makeCustomer, makeOrder, makeActiveOrder, memoryLog, gid, NOW_ISO } from './helpers.js';
+// The workbook's raw XML parts (what Microsoft Excel actually parses): shared with the other report tests.
+import { xlsxParts, worksheetPartsByName, worksheetChildren, worksheetOrderProblems, malformedParts, HAS_XMLLINT } from './report-fixture.js';
 
 const TZ = 'America/Los_Angeles';
 const FIXED_NOW = () => new Date('2026-10-12T17:00:00.000Z');
@@ -262,120 +262,6 @@ function findRow(ws, col, text) {
 
 function tmpLeftovers(dir) {
   return fs.readdirSync(dir).filter((f) => f.includes('.tmp-'));
-}
-
-// ---------------------------------------------------------------------------
-// The workbook's raw XML parts (what Microsoft Excel actually parses)
-// ---------------------------------------------------------------------------
-
-/** JSZip as installed for ExcelJS (which reads .xlsx files with it); null when it cannot be resolved. */
-function loadJSZip() {
-  try {
-    const requireHere = createRequire(import.meta.url);
-    return createRequire(requireHere.resolve('exceljs/package.json'))('jszip');
-  } catch {
-    return null;
-  }
-}
-
-/** { partName: text } of every file in an .xlsx (JSZip, else the `unzip` command). */
-async function xlsxParts(file) {
-  const JSZip = loadJSZip();
-  const parts = {};
-  if (JSZip) {
-    const zip = await JSZip.loadAsync(fs.readFileSync(file));
-    for (const [name, entry] of Object.entries(zip.files)) if (!entry.dir) parts[name] = await entry.async('string');
-    return parts;
-  }
-  const names = execFileSync('unzip', ['-Z1', file], { encoding: 'utf8' }).split('\n').filter((n) => n && !n.endsWith('/'));
-  for (const name of names) parts[name] = execFileSync('unzip', ['-p', file, name], { encoding: 'utf8', maxBuffer: 512 * 1024 * 1024 });
-  return parts;
-}
-
-const attr = (tag, name) => new RegExp(`\\s${name}="([^"]*)"`).exec(tag)?.[1] ?? null;
-
-/** Sheet name → its worksheet part name (e.g. '发放名单' → 'xl/worksheets/sheet3.xml'). */
-function worksheetPartsByName(parts) {
-  const rels = new Map([...parts['xl/_rels/workbook.xml.rels'].matchAll(/<Relationship\b[^>]*>/g)].map((m) => [attr(m[0], 'Id'), attr(m[0], 'Target')]));
-  const out = {};
-  for (const m of parts['xl/workbook.xml'].matchAll(/<sheet\b[^>]*>/g)) {
-    const target = rels.get(attr(m[0], 'r:id'));
-    const name = attr(m[0], 'name').replace(/&amp;/g, '&');
-    out[name] = target.startsWith('/') ? target.slice(1) : `xl/${target}`;
-  }
-  return out;
-}
-
-// CT_Worksheet in ECMA-376 / ISO-IEC 29500 sml.xsd: the children of <worksheet>, in this order.
-const CT_WORKSHEET_ORDER = [
-  'sheetPr', 'dimension', 'sheetViews', 'sheetFormatPr', 'cols', 'sheetData', 'sheetCalcPr', 'sheetProtection',
-  'protectedRanges', 'scenarios', 'autoFilter', 'sortState', 'dataConsolidate', 'customSheetViews', 'mergeCells',
-  'phoneticPr', 'conditionalFormatting', 'dataValidations', 'hyperlinks', 'printOptions', 'pageMargins', 'pageSetup',
-  'headerFooter', 'rowBreaks', 'colBreaks', 'customProperties', 'cellWatches', 'ignoredErrors', 'smartTags', 'drawing',
-  'legacyDrawing', 'legacyDrawingHF', 'drawingHF', 'picture', 'oleObjects', 'controls', 'webPublishItems', 'tableParts', 'extLst',
-];
-const REPEATABLE = new Set(['cols', 'conditionalFormatting']);
-
-/** Names of the direct children of <worksheet>, in document order. */
-function worksheetChildren(xml) {
-  const body = xml.replace(/<sheetData>[\s\S]*?<\/sheetData>/, '<sheetData/>');
-  const names = [];
-  let depth = 0;
-  for (const m of body.slice(body.indexOf('<worksheet')).matchAll(/<(\/?)([A-Za-z][\w:.-]*)\b[^>]*?(\/?)>/g)) {
-    const [, close, name, selfClosing] = m;
-    if (close) {
-      depth -= 1;
-      continue;
-    }
-    if (depth === 1) names.push(name);
-    if (!selfClosing) depth += 1;
-  }
-  return names;
-}
-
-/** Problems with a worksheet part's child elements against CT_Worksheet ([] = valid order). */
-function worksheetOrderProblems(xml) {
-  const problems = [];
-  const children = worksheetChildren(xml);
-  let last = -1;
-  let lastName = null;
-  for (const name of children) {
-    const i = CT_WORKSHEET_ORDER.indexOf(name);
-    if (i === -1) problems.push(`<${name}> is not a child of CT_Worksheet`);
-    else if (i < last || (i === last && !REPEATABLE.has(name))) problems.push(`<${name}> after <${lastName}>`);
-    else {
-      last = i;
-      lastName = name;
-    }
-  }
-  if (children.filter((n) => n === 'sheetData').length !== 1) problems.push('needs exactly one <sheetData>');
-  return { children, problems };
-}
-
-// XML 1.0 Char: #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
-const NOT_XML_CHAR = /[^\t\n\r\x20-\uD7FF\uE000-\uFFFD\u{10000}-\u{10FFFF}]/u;
-
-const HAS_XMLLINT = spawnSync('xmllint', ['--version'], { encoding: 'utf8' }).error === undefined;
-
-/** xmllint --noout on one XML text: null when well-formed, else the parser's message. */
-function xmllintError(xml) {
-  const r = spawnSync('xmllint', ['--noout', '-'], { input: xml, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
-  return r.status === 0 ? null : (r.stderr || r.stdout || `exit ${r.status}`).trim().split('\n').slice(0, 3).join(' | ');
-}
-
-/** Every XML part of the workbook that is not well-formed (xmllint when installed, plus a check of the characters). */
-function malformedParts(parts) {
-  const bad = [];
-  for (const [name, xml] of Object.entries(parts)) {
-    if (!/\.(xml|rels)$/.test(name)) continue;
-    const ch = NOT_XML_CHAR.exec(xml);
-    if (ch) bad.push(`${name}: character U+${ch[0].codePointAt(0).toString(16).toUpperCase().padStart(4, '0')} is not allowed in XML`);
-    if (HAS_XMLLINT) {
-      const err = xmllintError(xml);
-      if (err) bad.push(`${name}: ${err}`);
-    }
-  }
-  return bad;
 }
 
 // ---------------------------------------------------------------------------
@@ -1079,14 +965,18 @@ describe('excel review fixes', () => {
     const log = memoryLog();
     const out = path.join(blocker, 'copy.xlsx');
     const result = await write({ log, out });
+    const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     assert.equal(result.file, paths.excel);
     assert.equal(result.out, null);
-    assert.equal(result.warnings.length, 2, result.warnings.join('\n'));
-    assert.match(result.warnings[0], new RegExp(`^另存 Excel 到 ${out.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} 失败：`));
-    assert.equal(result.warnings[1], OPEN_IN_EXCEL_WARNING, 'the "Excel is open" check still runs');
+    assert.equal(result.fileEn, paths.excelEn, 'the English workbook is written too');
+    assert.equal(result.outEn, null, 'its copy (next to the Chinese one) fails the same way');
+    assert.equal(result.warnings.length, 3, result.warnings.join('\n'));
+    assert.match(result.warnings[0], new RegExp(`^另存 Excel 到 ${esc(out)} 失败：`));
+    assert.match(result.warnings[1], new RegExp(`^另存英文版 Excel 到 ${esc(path.join(blocker, 'copy-en.xlsx'))} 失败：`));
+    assert.equal(result.warnings[2], OPEN_IN_EXCEL_WARNING, 'the "Excel is open" check still runs');
     // G4: writeReport is the one place that logs its warnings, each exactly once
     for (const w of result.warnings) assert.equal(log.lines.filter((l) => l === `WARN ${w}`).length, 1, w);
-    assert.equal(log.lines.filter((l) => l.startsWith('WARN')).length, 2);
+    assert.equal(log.lines.filter((l) => l.startsWith('WARN')).length, 3);
     const wb = await openBook(paths.excel);
     assert.equal(wb.worksheets.length, 9, 'the main workbook is complete');
     assert.deepEqual(fs.readdirSync(env.dir).filter((f) => f.includes('.tmp-')), []);
@@ -2305,24 +2195,29 @@ describe('excel performance', () => {
     lines.push(JSON.stringify({ t: '2026-10-05T19:00:00.000Z', op: 'run.end', run: 'R1', summary: { created: N }, exitCode: 0 }));
     fs.writeFileSync(paths.journal, `${lines.join('\n')}\n`);
 
+    // Both editions (Chinese, then English) within the budget.
     const started = Date.now();
     const result = await writeReport({ config, paths, log: memoryLog(), now: FIXED_NOW, lockOptions: FAST_LOCK });
     const elapsed = Date.now() - started;
     assert.ok(elapsed < 60_000, `took ${elapsed} ms`);
     assert.deepEqual(result.warnings, []);
+    assert.equal(result.fileEn, paths.excelEn);
 
-    // Stream the result back to prove it is complete and well-formed.
-    const counts = {};
-    const reader = new ExcelJS.stream.xlsx.WorkbookReader(paths.excel, { sharedStrings: 'ignore', hyperlinks: 'ignore', styles: 'ignore', worksheets: 'emit' });
-    for await (const sheet of reader) {
-      let n = 0;
-      for await (const row of sheet) if (row.hasValues) n += 1;
-      counts[sheet.name ?? sheet.id] = n;
+    // Stream the results back to prove they are complete and well-formed.
+    for (const file of [paths.excel, paths.excelEn]) {
+      const counts = {};
+      const reader = new ExcelJS.stream.xlsx.WorkbookReader(file, { sharedStrings: 'ignore', hyperlinks: 'ignore', styles: 'ignore', worksheets: 'emit' });
+      for await (const sheet of reader) {
+        let n = 0;
+        for await (const row of sheet) if (row.hasValues) n += 1;
+        counts[sheet.name ?? sheet.id] = n;
+      }
+      const values = Object.values(counts);
+      const name = path.basename(file);
+      assert.ok(values.includes(N + 1), `${name} 发放名单 rows: ${JSON.stringify(counts)}`);
+      assert.ok(values.includes(M + 1), `${name} 未入选 rows: ${JSON.stringify(counts)}`);
+      assert.ok(values.includes(lines.length - 2 + 1), `${name} 操作日志 rows: ${JSON.stringify(counts)}`);
     }
-    const values = Object.values(counts);
-    assert.ok(values.includes(N + 1), `发放名单 rows: ${JSON.stringify(counts)}`);
-    assert.ok(values.includes(M + 1), `未入选 rows: ${JSON.stringify(counts)}`);
-    assert.ok(values.includes(lines.length - 2 + 1), `操作日志 rows: ${JSON.stringify(counts)}`);
   });
 });
 

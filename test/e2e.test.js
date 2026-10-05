@@ -86,6 +86,15 @@ test('e2e: a whole campaign with the real commands and the real Excel', { timeou
   };
   const log = memoryLog();
   const ok = (result, what) => assert.equal(result.exitCode, 0, `${what} failed:\n${log.lines.slice(-40).join('\n')}`);
+  /**
+   * Every command that writes the report writes both editions. The English file is
+   * removed again afterwards (unless `keep`), so the next check proves a fresh write.
+   */
+  const bothWorkbooks = (what, { keep = false } = {}) => {
+    assert.ok(fs.existsSync(paths.excel), `${what} writes the Excel:\n${log.lines.slice(-20).join('\n')}`);
+    assert.ok(fs.existsSync(paths.excelEn), `${what} writes the English Excel:\n${log.lines.slice(-20).join('\n')}`);
+    if (!keep) fs.rmSync(paths.excelEn);
+  };
 
   const busy = makeCustomer({ n: 8, address: ADDR('8 Busy St'), lastOrder: makeOrder({ n: 801, createdAt: '2026-09-15T12:00:00Z', total: '20.00' }) });
   const customers = [
@@ -110,7 +119,7 @@ test('e2e: a whole campaign with the real commands and the real Excel', { timeou
     assert.deepEqual(selection.recipients.map((r) => r.customerId), [cid(1), cid(2), cid(3), cid(6), cid(4)]);
     assert.deepEqual(selection.recipients.map((r) => r.amountCents), [1533, 1077, 1977, 1077, 1977]);
     assert.equal(selection.stats.totalCents, 1533 + 1077 + 1977 + 1077 + 1977);
-    assert.ok(fs.existsSync(paths.excel), 'select writes the Excel');
+    bothWorkbooks('select');
 
     // ---- live issue before LAUNCH_DATE is refused; a dry run is allowed ---------
     assert.equal((await runIssue({ config, limit: 2, log, now, sleep })).exitCode, 2);
@@ -121,6 +130,7 @@ test('e2e: a whole campaign with the real commands and the real Excel', { timeou
     assert.equal(fake.opsNamed('TagsAdd').length, 0, 'a dry run tags nobody');
     assert.deepEqual(readJournal(paths.journal).slice(journalBefore).map((e) => e.op), ['run.start', 'run.end'], 'a dry run only records that it ran');
     assert.ok(fs.existsSync(path.join(paths.previewDir, 'first.html')), 'the dry run renders the first email');
+    bothWorkbooks('dry-run issue');
 
     // ---- 10/5 issue: 2, then the rest with one lost response --------------------
     at('2026-10-05T16:00:00Z');
@@ -129,6 +139,7 @@ test('e2e: a whole campaign with the real commands and the real Excel', { timeou
     assert.deepEqual(fake.state.calls.create.map((c) => c.customerId), [cid(1), cid(2)]);
     assert.deepEqual(fake.state.calls.create.map((c) => c.initialAmount.amount), ['15.33', '10.77']);
     assert.ok(fake.state.calls.create.every((c) => c.note === 'gift-card-promo [campaign:2026-10]' && c.templateSuffix === 'gift-card-promo' && c.expiresOn === '2026-10-19'));
+    bothWorkbooks('issue --limit 2');
 
     at('2026-10-05T16:30:00Z');
     fake.state.failures.GiftCardCreate = [{ kind: 'appliedThenLost' }]; // Shopify creates c3's card, the answer is lost
@@ -139,11 +150,14 @@ test('e2e: a whole campaign with the real commands and the real Excel', { timeou
     for (const r of selection.recipients) assert.equal(state.customers.get(r.customerId).status, 'done', `${r.customerId} done`);
     assert.equal(state.customers.get(cid(3)).reconciledFrom, 'issue-inline', 'the lost response was reconciled, not re-created');
     for (const n of [1, 2, 3, 4, 6]) assert.ok(fake.state.customers.find((c) => c.id === cid(n)).tags.includes('OCT26RTPROMO'));
+    bothWorkbooks('issue --limit 10');
 
     const createsSoFar = creates();
     ok(await runIssue({ config, limit: 10, log, now, sleep }), 'issue with nobody left');
     assert.equal(creates(), createsSoFar, 'a re-run never creates a second card');
+    bothWorkbooks('issue with nobody left');
     assert.equal((await runSelect({ config, log, now, sleep, bulkPollMs: 1 })).exitCode, 1, 'select is frozen once issuing started');
+    bothWorkbooks('the refused select (it still regenerates the report from the frozen list)');
 
     // ---- 10/8 Ann uses $5 of her card ------------------------------------------
     const annCard = cardOf(1)[0];
@@ -164,11 +178,14 @@ test('e2e: a whole campaign with the real commands and the real Excel', { timeou
     at('2026-10-12T17:00:00Z');
     ok(await runRemind({ config: dryConfig, round: 1, log, now, sleep }), 'dry-run remind');
     assert.equal(notifies(), 0, 'a dry run sends nothing');
+    bothWorkbooks('dry-run remind');
     ok(await runRemind({ config, round: 1, log, now, sleep }), 'remind --round 1');
     const unusedIds = [2, 3, 6, 4].map((n) => cardOf(n)[0].id);
     assert.deepEqual(fake.state.calls.notify, unusedIds, 'only unused cards, in list order');
+    bothWorkbooks('remind --round 1');
     ok(await runRemind({ config, round: 1, log, now, sleep }), 'remind --round 1 again');
     assert.equal(notifies(), 4, 'round 1 is sent at most once per person');
+    bothWorkbooks('remind --round 1 again');
 
     // ---- 10/13 usage --------------------------------------------------------------
     at('2026-10-13T17:00:00Z');
@@ -182,6 +199,7 @@ test('e2e: a whole campaign with the real commands and the real Excel', { timeou
     assert.equal(usage.summary.customerPaidCents, 4000);
     assert.deepEqual(usage.orders[0].lineItems.map((l) => [l.name, l.quantity]), [['Gold Balloon Arch', 1]]);
     assert.ok(fs.existsSync(path.join(paths.usageDir, '2026-10-13.json')));
+    bothWorkbooks('usage');
 
     // ---- 10/16 round 2: customer 3 has unsubscribed meanwhile ----------------------
     fake.state.customers.find((c) => c.id === cid(3)).defaultEmailAddress.marketingState = 'UNSUBSCRIBED';
@@ -191,16 +209,26 @@ test('e2e: a whole campaign with the real commands and the real Excel', { timeou
     const reminders = foldJournal(readJournal(paths.journal)).customers;
     assert.equal(reminders.get(cid(1)).reminders['1'].reason, 'used');
     assert.equal(reminders.get(cid(3)).reminders['2'].reason, 'not-subscribed');
+    bothWorkbooks('remind --round 2');
 
     // ---- verify and export ------------------------------------------------------------
     ok(await runVerify({ config, log, now }), 'verify');
     const verify = readJson(paths.verify);
     assert.equal(verify.cardCount, 5);
     assert.deepEqual(verify.issues, [], `verify found problems: ${JSON.stringify(verify.issues)}`);
+    bothWorkbooks('verify');
     fs.mkdirSync(path.join(dir, 'copy'));
     const out = path.join(dir, 'copy', 'report.xlsx');
-    ok(await runExport({ config, out, log, now }), 'export');
+    const exported = await runExport({ config, out, log, now });
+    ok(exported, 'export');
     assert.ok(fs.existsSync(out));
+    bothWorkbooks('export', { keep: true });
+    // --out <file>.xlsx also saves the English edition as <file>-en.xlsx next to it.
+    const outEn = path.join(dir, 'copy', 'report-en.xlsx');
+    assert.equal(exported.outEn, outEn);
+    assert.ok(fs.existsSync(outEn), 'export saves the English copy next to the Chinese one');
+    assert.ok(log.lines.includes(`INFO 英文版 Excel 已导出：${paths.excelEn}`), log.lines.slice(-10).join('\n'));
+    assert.ok(log.lines.includes(`INFO 英文版另存一份：${outEn}`), log.lines.slice(-10).join('\n'));
 
     // ---- the final Excel ----------------------------------------------------------------
     const wb = await readWorkbook(paths.excel);
@@ -219,6 +247,17 @@ test('e2e: a whole campaign with the real commands and the real Excel', { timeou
     assert.equal(usedSheet.rows.length, 1);
     assert.match(usedSheet.rows[0]['买了什么'], /Gold Balloon Arch × 1/);
     assert.equal(fs.readdirSync(paths.dir).filter((f) => f.includes('.tmp')).length, 0, 'no temp files left in the campaign folder');
+
+    // ---- the English edition: the same structure (sheet names are checked by test/excel-en.test.js) ----
+    const wbEn = await readWorkbook(paths.excelEn);
+    assert.equal(wbEn.worksheets.length, wb.worksheets.length, 'same number of sheets');
+    wb.worksheets.forEach((ws, i) => {
+      const wsEn = wbEn.worksheets[i];
+      assert.equal(wsEn.rowCount, ws.rowCount, `sheet ${i + 1} ("${ws.name}" / "${wsEn.name}"): same number of rows`);
+      assert.equal(wsEn.actualRowCount, ws.actualRowCount, `sheet ${i + 1} ("${ws.name}" / "${wsEn.name}"): same number of non-empty rows`);
+    });
+    const copyEn = await readWorkbook(outEn);
+    assert.deepEqual(copyEn.worksheets.map((ws) => [ws.name, ws.rowCount]), wbEn.worksheets.map((ws) => [ws.name, ws.rowCount]), 'the English copy is the English workbook');
   } finally {
     fake.restore();
   }

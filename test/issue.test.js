@@ -114,7 +114,7 @@ async function setup({ n = 6, customers, env = {}, failures = {}, testCampaign =
         sleep: noop,
         writeReport: async (o) => {
           reports.push(o);
-          return { file: paths.excel, out: null, warnings: [] };
+          return { file: paths.excel, fileEn: paths.excelEn, out: null, outEn: null, warnings: [] };
         },
         renderPreview: async (o) => {
           previews.push(o);
@@ -1300,6 +1300,27 @@ describe('issue: interruption and the Excel', () => {
     assertSummary(journal.at(-1), { op: 'run.end', exitCode: 130 });
     assert.equal(h.reports.length, 1, 'the Excel is still regenerated');
     assert.ok(h.logged('收到中断信号'));
+  });
+
+  it('prints the English workbook path right after the Chinese one; nothing extra when fileEn is null', async () => {
+    await setup({ n: 2 });
+    const { exitCode } = await h.run({ limit: 1 });
+    assert.equal(exitCode, 0);
+    const excelAt = h.log.lines.indexOf(`INFO Excel 已更新：${h.paths.excel}`);
+    assert.ok(excelAt >= 0, h.log.lines.join('\n'));
+    assert.equal(h.log.lines[excelAt + 1], `INFO 英文版 Excel 已更新：${h.paths.excelEn}`, h.log.lines.join('\n'));
+
+    // The English edition failed (writeReport already warned): only the Chinese path, exit code unchanged.
+    const mark = h.log.lines.length;
+    const englishFailed = async (o) => {
+      o.log.warn('英文版 Excel 没有生成：disk full');
+      return { file: h.paths.excel, fileEn: null, out: null, outEn: null, warnings: ['英文版 Excel 没有生成：disk full'] };
+    };
+    assert.equal((await h.run({ limit: 1, writeReport: englishFailed })).exitCode, 0);
+    const lines = h.log.lines.slice(mark);
+    assert.ok(lines.includes(`INFO Excel 已更新：${h.paths.excel}`), lines.join('\n'));
+    assert.equal(lines.filter((l) => l.includes('英文版 Excel 已更新')).length, 0, lines.join('\n'));
+    assert.equal(lines.filter((l) => l === 'WARN 英文版 Excel 没有生成：disk full').length, 1, 'printed once, by writeReport');
   });
 
   it('a failing Excel export never changes the exit code', async () => {

@@ -474,4 +474,6 @@ function logSummary(selection, { paths, log, reused }) {
   if (!s.recipients) log.warn('  名单是空的：没有任何客户入选');
   log.info(`  名单文件：${paths.selection}`);
   log.info(`  Excel：${paths.excel}`);
+  // The English edition is written next to it by the same writeReport call (campaignPaths.excelEn).
+  if (paths.excelEn) log.info(`  英文版 Excel：${paths.excelEn}`);
 }
