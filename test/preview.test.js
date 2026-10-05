@@ -225,13 +225,14 @@ test('the promo body: the image copy, every date from the card expiry, no amount
   // Shop name heading (no email logo), the store link, the footer.
   assert.ok(promo.includes('<a href="https://www.laballoons.com">LA Balloons</a>'));
   assert.ok(!promo.includes('<img src=""'));
-  assert.ok(promo.includes('Visit our store'));
+  assert.ok(!promo.includes('Visit our store'), 'the promo email has the button only');
   assert.ok(promo.includes('1422 Gardena Ave., Glendale, CA 91204'));
 
   const original = emailOnly(byVariant.original.html);
   assert.equal(emailTitle(byVariant.original.html), 'Your Online Credit Code is now available!');
   assert.ok(original.includes('Hi Alex, here is your $15.33 online credit code.'));
   assert.equal(buttonText(byVariant.original.html), 'View your Online Credit Code');
+  assert.ok(original.includes('Visit our store'), 'the original email keeps the store link');
   assert.ok(!original.includes('Balloon Math') && !original.includes('Promotional reward') && !original.includes('October 19, 2026'));
 });
 
@@ -662,4 +663,13 @@ test('renderPreviewFor works as the issue dry run calls it: config, paths, varia
   const nameless = await renderPreviewFor({ config: s.config, paths: s.paths, variant: 'first', recipient: { seq: 7, firstName: '', amountCents: 1077 }, templatesDir: s.templatesDir, log: s.log });
   assert.ok(read(nameless.file).includes('<p>Hello,</p>'), 'shows exactly what Shopify would print');
   assert.ok(warnings(s.log).some((l) => l.includes('名单第 7 号顾客没有名字')));
+});
+
+test('the greeting uses the first name up to the first "(": a domain stored in the name field is left out', async () => {
+  const s = setup();
+  const render = async (firstName) => read((await renderPreviewFor({ config: s.config, paths: s.paths, variant: 'first', recipient: { seq: 1, firstName, amountCents: 1077 }, templatesDir: s.templatesDir, log: s.log })).file);
+  assert.ok((await render('xianwei(laballoons.com)')).includes('<p>Hello xianwei,</p>'));
+  assert.ok((await render('Ann Marie (work)')).includes('<p>Hello Ann Marie,</p>'), 'spaces before the bracket are trimmed');
+  assert.ok((await render('(laballoons.com)')).includes('<p>Hello,</p>'), 'nothing before the bracket: no name');
+  assert.ok((await render('Maria')).includes('<p>Hello Maria,</p>'), 'a plain name is unchanged');
 });

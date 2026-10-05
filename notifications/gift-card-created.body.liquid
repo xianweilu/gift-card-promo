@@ -21,8 +21,13 @@
 {%- capture promo_long_date -%}{{ gift_card.expires_on | date: '%B %-d, %Y' }}{%- endcapture -%}
 {%- capture promo_short_date -%}{{ gift_card.expires_on | date: '%-m/%-d/%Y' }}{%- endcapture -%}
 {%- endif -%}
+{%- comment -%}
+  Greeting name: the customer's first name up to the first "(". Some imported
+  customers carry a domain in the name field ("xianwei(laballoons.com)"); the
+  email greets them by the part before the bracket only.
+{%- endcomment -%}
 {%- assign promo_name = '' -%}
-{%- if gift_card.customer and gift_card.customer.first_name != blank -%}{%- assign promo_name = gift_card.customer.first_name -%}{%- endif -%}
+{%- if gift_card.customer and gift_card.customer.first_name != blank -%}{%- assign promo_name = gift_card.customer.first_name | split: '(' | first | strip -%}{%- endif -%}
 
 {% if is_promo %}
 {% capture email_title %}{% endcapture %}
@@ -120,6 +125,8 @@ This voucher is distributed entirely for free as part of a temporary marketing p
               Shopify's notification stylesheet floats .main-action-cell to the left.
               align="center" plus the inline styles override that so the button and
               the "Visit our store" link sit centered under the centered text.
+              The promo email has the button only; the "or Visit our store" link
+              stays in the original email.
             {%- endcomment -%}
             <table class="row actions">
   <tr>
@@ -129,7 +136,7 @@ This voucher is distributed entirely for free as part of a temporary marketing p
           <td class="button__cell"><a href="{{ gift_card.url }}" class="button__text">{{ button_text }}</a></td>
         </tr>
       </table>
-      {% if shop.url %}
+      {% if shop.url and is_promo == false %}
     <table class="link secondary-action-cell" align="center" style="margin: 20px auto 0 auto;">
       <tr>
         <td class="link__cell" align="center" style="text-align: center;"><a href="{{ shop.url }}" class="link__text"><span class='or'>or</span> Visit our store</a></td>
