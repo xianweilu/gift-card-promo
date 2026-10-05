@@ -15,10 +15,10 @@
 //   reconcile.none   an in_progress/unknown row's card is still absent at least
 //                    `unknownSettleMs` after create.start (search-index lag ruled
 //                    out), so the row goes back to pending and may be retried
-//                    (for the real campaign only before REMIND_1_DATE: from that
-//                    store date on, issue creates no new card)
-// verify holds the run lock, so no issue/remind can append to the journal or
-// leave a live in_progress row while it runs.
+//                    (only before the cards' expiry date: from that store date
+//                    on, issue creates no new card)
+// verify holds the run lock, so no issue can append to the journal or leave a
+// live in_progress row while it runs.
 
 import fs from 'node:fs';
 import {
@@ -215,14 +215,14 @@ const RECORDED_ACTION = bi('已按 Shopify 补记到本地日志', 'Recorded in 
 
 /**
  * Action of a row verify puts back to pending (reconcile.none). `noNewCardsSince` is
- * REMIND_1_DATE once the store date has reached it for the real campaign: issue then
- * only repairs and never creates a card (its creation email would show reminder copy).
+ * the cards' expiry date once the store date has reached it: issue then only repairs
+ * and never creates a card (the same rule as src/issue.js, test campaigns included).
  */
 function settledNoneAction(noNewCardsSince) {
   if (!noNewCardsSince) return bi('已在本地日志改回待发放，可以用 issue 重试', 'Set back to Pending in the local journal; issue can retry it');
   return bi(
-    `已在本地日志改回待发放；正式活动从 REMIND_1_DATE（${noNewCardsSince}）起 issue 不再建新卡，确需补发请先改提醒日期并重贴模板`,
-    `Set back to Pending in the local journal; for the live campaign issue creates no new cards from REMIND_1_DATE (${noNewCardsSince}) on. To issue it anyway, move the reminder date first and re-paste the templates`,
+    `已在本地日志改回待发放；礼品卡到期日（${noNewCardsSince}）已到，issue 不再建新卡`,
+    `Set back to Pending in the local journal; the cards' expiry date (${noNewCardsSince}) has been reached, so issue creates no new cards`,
   );
 }
 
@@ -261,18 +261,18 @@ function foundFix(cid, card) {
  * @param {number} [a.unknownSettleMs] an unknown row is settled this long after create.start
  * @param {string} a.tag SENT_TAG (for the texts)
  * @param {string} [a.timezone] store time zone for the texts
- * @param {string} [a.remind1Date] REMIND_1_DATE of the current config ('' = none): from that store
- *   date on, issue creates no new card for the real campaign (same rule as src/issue.js)
  * @returns {{ issues: object[], fixes: object[], counts: Record<string, number> }}
  *   issues: [{ type, customerId, giftCardId, journal, shopify, action, journalEn, shopifyEn, actionEn }]
  *   in report order (the *En fields say the same in English, for the English workbook);
  *   fixes: journal entries to append (without `run`), in customer order.
  */
-export function analyzeVerify({ selection, state, cards, taggedIds, nowMs, unknownSettleMs = DEFAULT_UNKNOWN_SETTLE_MS, tag, timezone = 'UTC', remind1Date = '' }) {
+export function analyzeVerify({ selection, state, cards, taggedIds, nowMs, unknownSettleMs = DEFAULT_UNKNOWN_SETTLE_MS, tag, timezone = 'UTC' }) {
   const tz = timezone;
   const currency = selection.params?.currency || '';
-  // Test campaigns are not bound to the campaign dates (issue creates their cards any day).
-  const noNewCardsSince = selection.mode !== 'test' && remind1Date && localDate(nowMs, tz) >= remind1Date ? remind1Date : '';
+  // From the cards' expiry date on (the date frozen in the list, which every card is created
+  // with) issue creates no new card, for test campaigns too: same rule as src/issue.js.
+  const expiresOn = selection.params?.giftCardExpiresOn || '';
+  const noNewCardsSince = expiresOn && localDate(nowMs, tz) >= expiresOn ? expiresOn : '';
   const recipients = new Map(selection.recipients.map((r) => [r.customerId, r]));
   const journal = state.customers;
   const sortedCards = [...cards].sort(compareCards);
@@ -530,7 +530,6 @@ async function verifyCampaign({ config, paths, selection, log, now, sleep, unkno
     unknownSettleMs,
     tag,
     timezone: tz,
-    remind1Date: config.remind1Date,
   });
 
   // Local fix-ups only; each line is fsynced on its own, so a crash here loses nothing already written.

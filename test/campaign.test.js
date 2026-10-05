@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   campaignPaths, writeJsonAtomic, readJson, writeFileAtomic, acquireRunLock, runningCommand, withExcelLock, LockError,
-  lockHolder, appendJournal, readJournal, foldJournal, newRunId, STATUS, REMIND_STATUS,
+  lockHolder, appendJournal, readJournal, foldJournal, newRunId, STATUS, USED_TAG_STATUS,
 } from '../src/campaign.js';
 
 const CAMPAIGN_URL = new URL('../src/campaign.js', import.meta.url).href;
@@ -98,15 +98,15 @@ test('campaign: a lock left by a dead process is cleaned up automatically, whate
   release();
 
   // The host name is informational only (a Mac's host name changes with the network): a dead pid is stale ...
-  writeStaleLock(p.runLock, { host: 'some-other-mac', command: 'remind' });
+  writeStaleLock(p.runLock, { host: 'some-other-mac', command: 'export' });
   assert.equal(runningCommand(p), null);
   acquireRunLock(p, 'issue')();
-  writeStaleLock(p.runLock, { host: undefined, command: 'remind' });
+  writeStaleLock(p.runLock, { host: undefined, command: 'export' });
   acquireRunLock(p, 'issue')();
   // ... and a live pid is held, whatever host it names.
-  fs.writeFileSync(p.runLock, JSON.stringify({ pid: process.pid, host: 'some-other-mac', command: 'remind', startedAt: 'x', token: 't' }));
-  assert.equal(runningCommand(p), 'remind');
-  assert.throws(() => acquireRunLock(p, 'issue'), (err) => err instanceof LockError && err.message.startsWith('remind 正在运行'));
+  fs.writeFileSync(p.runLock, JSON.stringify({ pid: process.pid, host: 'some-other-mac', command: 'export', startedAt: 'x', token: 't' }));
+  assert.equal(runningCommand(p), 'export');
+  assert.throws(() => acquireRunLock(p, 'issue'), (err) => err instanceof LockError && err.message.startsWith('export 正在运行'));
   fs.unlinkSync(p.runLock);
 
   // The Excel lock follows the same rules.
@@ -450,7 +450,7 @@ test('locks: three processes after a crash (B checks, A wins, B moves aside, C a
     fs.renameSync = realRename;
     a = attempt(p, 'issue', errors);
     realRename.call(this, from, to);
-    c = attempt(p, 'remind', errors);
+    c = attempt(p, 'export', errors);
     return undefined;
   };
   let b;
@@ -519,12 +519,12 @@ test('locks: every interleaving of three processes after a crash leaves exactly 
   };
   const nested = (momentA, momentB) => scenario((r, errors) => interleave(
     () => { r.a = attempt(p, 'issue', errors); },
-    () => { r.callsB = interleave(() => { r.b = attempt(p, 'verify', errors); }, () => { r.c = attempt(p, 'remind', errors); }, momentB); },
+    () => { r.callsB = interleave(() => { r.b = attempt(p, 'verify', errors); }, () => { r.c = attempt(p, 'export', errors); }, momentB); },
     momentA,
   ));
   const oneByOne = (momentB, momentC) => scenario((r, errors) => interleaveAll(() => { r.a = attempt(p, 'issue', errors); }, [
     { ...momentB, run: () => { r.b = attempt(p, 'verify', errors); } },
-    { ...momentC, run: () => { r.c = attempt(p, 'remind', errors); } },
+    { ...momentC, run: () => { r.c = attempt(p, 'export', errors); } },
   ]));
   const releaseAll = (r) => { for (const x of r.parties) x?.release?.(); };
   const order = (m) => m.at * 2 + (m.after ? 1 : 0);
@@ -700,7 +700,7 @@ process.on('message', (m) => {
   }
   while (Date.now() < m.startAt) { /* spin, so that every process starts at the same instant */ }
   try {
-    release = acquireRunLock({ runLock: m.lock }, 'remind');
+    release = acquireRunLock({ runLock: m.lock }, 'export');
     process.send({ got: true });
   } catch (err) {
     process.send({ got: false, unexpected: err.name === 'LockError' ? null : String(err.stack) });
@@ -881,7 +881,7 @@ test('fold: issuing has started (the list is frozen) once a live issue run start
   assert.equal(started([{ op: 'run.start', run: 'r1', command: 'issue', dryRun: false, batch: 1 }, { op: 'skip', cid: CID, reason: 'not-subscribed', batch: 1 }, { op: 'run.end', run: 'r1', exitCode: 130 }]), true);
   assert.equal(started([{ op: 'run.start', run: 'r1', command: 'issue', batch: 1 }]), true, 'without a dryRun flag a run counts as live (as in runs[])');
   assert.equal(started([{ op: 'run.start', run: 'r1', command: 'issue', dryRun: true, batch: 1 }, { op: 'run.end', run: 'r1', exitCode: 0 }]), false, 'dry runs do not');
-  for (const command of ['select', 'verify', 'usage', 'remind']) {
+  for (const command of ['select', 'verify', 'usage', 'export']) {
     assert.equal(started([{ op: 'run.start', run: 'r1', command, dryRun: false }, { op: 'run.end', run: 'r1', exitCode: 0 }]), false, command);
   }
   // Any issue op, even without a create.start (e.g. the journal lost its lines and verify re-recorded the card: selection#1).
@@ -893,11 +893,11 @@ test('fold: issuing has started (the list is frozen) once a live issue run start
     { op: 'reconcile.found', cid: CID, giftCardId: 'gid://shopify/GiftCard/5', source: 'verify', run: 'v1' },
     { op: 'run.end', run: 'v1', exitCode: 0 },
   ]), true);
-  // Reminder ops and unknown ops do not (only issue ops do).
-  for (const op of ['remind.start', 'remind.ok', 'remind.fail', 'remind.unknown', 'remind.rejected', 'remind.skip', 'remind.found', 'remind.tag.fail', 'remind.tag.ok', 'some.future.op']) {
+  // Used-tag ops, the old reminder ops (journals written before remind was removed) and unknown ops do not (only issue ops do).
+  for (const op of ['used.tag.ok', 'used.tag.fail', 'remind.start', 'remind.ok', 'remind.fail', 'remind.unknown', 'remind.rejected', 'remind.skip', 'remind.found', 'remind.tag.fail', 'remind.tag.ok', 'some.future.op']) {
     assert.equal(started([{ op, cid: CID, round: 1 }]), false, op);
   }
-  assert.equal(started([{ op: 'remind.start', cid: CID, round: 1 }, { op: 'remind.ok', cid: CID, round: 1 }, { op: 'remind.tag.fail', cid: CID, round: 1, error: 'x' }, { op: 'remind.found', cid: CID, round: 2, source: 'tag' }]), false);
+  assert.equal(started([{ op: 'used.tag.ok', cid: CID, giftCardId: 'g', run: 'u1' }, { op: 'used.tag.fail', cid: CID, giftCardId: 'g', error: 'x', run: 'u2' }]), false);
   // `issue --repair-only` never creates a card: its start alone does not freeze the list; what it records does.
   assert.equal(started([{ op: 'run.start', run: 'r1', command: 'issue', dryRun: false, batch: 1, options: { repairOnly: true } }, { op: 'run.end', run: 'r1', exitCode: 0 }]), false);
   assert.equal(started([{ op: 'run.start', run: 'r1', command: 'issue', dryRun: false, batch: 1, options: { repairOnly: true } }, { op: 'tag.ok', cid: CID, run: 'r1' }]), true);
@@ -918,118 +918,71 @@ test('fold: lastIssuedBatch counts only batches that attempted a card (repair-on
   assert.equal(fold([]).lastIssuedBatch, 0);
 });
 
-test('fold: a deleted customer settles the round-tag repair for good', () => {
-  const r = fold([
-    { op: 'remind.start', cid: CID, round: 1, giftCardId: 'g' },
-    { op: 'remind.ok', cid: CID, round: 1 },
-    { op: 'remind.tag.fail', cid: CID, round: 1, error: 'tagsAdd rejected: id: Customer not found' },
-    { op: 'remind.tag.ok', cid: CID, round: 1, note: 'customer deleted' },
-  ]).customers.get(CID).reminders['1'];
-  assert.equal(r.status, 'sent');
-  assert.equal(r.tagError, null);
-  assert.equal(r.tagSettled, true);
-});
-
 test('fold: runs, batches and dry runs', () => {
   const s = fold([
     { op: 'run.start', run: 'r1', command: 'issue', dryRun: true, batch: 1, limit: 20 },
     { op: 'run.end', run: 'r1', summary: { attempted: 0 }, exitCode: 0 },
     { op: 'run.start', run: 'r2', command: 'issue', dryRun: false, batch: 1, limit: 20 },
     { op: 'run.end', run: 'r2', summary: { created: 20 }, exitCode: 0 },
-    { op: 'run.start', run: 'r3', command: 'remind', dryRun: false, options: { round: 1 } },
+    { op: 'run.start', run: 'r3', command: 'export', dryRun: false, options: { refresh: true } },
     { op: 'some.future.op', cid: CID },
   ]);
   assert.equal(s.lastBatch, 1, 'dry runs do not use up a batch number');
   assert.equal(s.runs.length, 3);
-  assert.deepEqual(s.runs.map((r) => [r.run, r.command, r.dryRun]), [['r1', 'issue', true], ['r2', 'issue', false], ['r3', 'remind', false]]);
+  assert.deepEqual(s.runs.map((r) => [r.run, r.command, r.dryRun]), [['r1', 'issue', true], ['r2', 'issue', false], ['r3', 'export', false]]);
   assert.equal(s.runs[1].exitCode, 0);
   assert.deepEqual(s.runs[1].summary, { created: 20 });
   assert.equal(s.runs[2].endedAt, null, 'a run that never ended (crash) stays open');
-  assert.deepEqual(s.runs[2].options, { round: 1 });
+  assert.deepEqual(s.runs[2].options, { refresh: true });
   assert.equal(s.customers.size, 0, 'unknown ops are ignored, so newer journals stay readable');
   assert.equal(s.issuingStarted, true, 'r2 is a live issue run');
 });
 
-test('fold: reminders per round', () => {
-  const r = (entries, round = '1') => fold(entries).customers.get(CID).reminders[round];
-  assert.equal(r([{ op: 'remind.start', cid: CID, round: 1, giftCardId: 'g' }]).status, REMIND_STATUS.IN_PROGRESS);
-  const sent = r([{ op: 'remind.start', cid: CID, round: 1, giftCardId: 'g' }, { op: 'remind.ok', cid: CID, round: 1 }]);
-  assert.equal(sent.status, REMIND_STATUS.SENT);
-  assert.equal(sent.giftCardId, 'g');
-  assert.equal(sent.at, '2026-10-05T16:00:01.000Z');
-  assert.equal(r([{ op: 'remind.start', cid: CID, round: 1 }, { op: 'remind.fail', cid: CID, round: 1, error: 'bad' }]).status, REMIND_STATUS.FAILED);
-  assert.equal(r([{ op: 'remind.start', cid: CID, round: 1 }, { op: 'remind.unknown', cid: CID, round: 1, error: 'lost' }]).status, REMIND_STATUS.UNKNOWN);
-  assert.equal(r([{ op: 'remind.start', cid: CID, round: 1 }, { op: 'remind.rejected', cid: CID, round: 1 }]), undefined, 'rejected → may be tried again');
-  const skipped = r([{ op: 'remind.skip', cid: CID, round: 1, reason: 'used', detail: '$5.00' }]);
-  assert.equal(skipped.status, REMIND_STATUS.SKIPPED);
-  assert.equal(skipped.reason, 'used');
-  // A later skip never hides a reminder that was sent (or whose outcome is unknown).
-  assert.equal(r([{ op: 'remind.start', cid: CID, round: 1 }, { op: 'remind.ok', cid: CID, round: 1 }, { op: 'remind.skip', cid: CID, round: 1, reason: 'used' }]).status, REMIND_STATUS.SENT);
-  assert.equal(r([{ op: 'remind.start', cid: CID, round: 1 }, { op: 'remind.unknown', cid: CID, round: 1 }, { op: 'remind.skip', cid: CID, round: 1, reason: 'used' }]).status, REMIND_STATUS.UNKNOWN);
-  // A skip can be replaced by a newer skip or by a send.
-  assert.equal(r([{ op: 'remind.skip', cid: CID, round: 1, reason: 'not-subscribed' }, { op: 'remind.skip', cid: CID, round: 1, reason: 'used' }]).reason, 'used');
-  assert.equal(r([{ op: 'remind.skip', cid: CID, round: 1, reason: 'used' }, { op: 'remind.start', cid: CID, round: 1 }, { op: 'remind.ok', cid: CID, round: 1 }]).status, REMIND_STATUS.SENT);
-  // Rounds are independent.
-  const both = fold([{ op: 'remind.start', cid: CID, round: 1 }, { op: 'remind.ok', cid: CID, round: 1 }, { op: 'remind.skip', cid: CID, round: 2, reason: 'used' }]).customers.get(CID).reminders;
-  assert.equal(both['1'].status, REMIND_STATUS.SENT);
-  assert.equal(both['2'].status, REMIND_STATUS.SKIPPED);
-  assert.equal(fold([{ op: 'remind.start', cid: CID, round: 1 }]).issuingStarted, false);
-});
-
-test('fold: remind.found (the round tag in Shopify) makes a round sent; remind.tag.fail / remind.tag.ok record and clear a failed round tag', () => {
-  const r = (entries, round = '1') => fold(entries).customers.get(CID)?.reminders?.[round];
-  const start = { op: 'remind.start', cid: CID, round: 1, giftCardId: 'g', run: 'r1' };
-  const found = { op: 'remind.found', cid: CID, round: 1, source: 'tag', run: 'r9' };
-  const FOUND_STATE = { status: REMIND_STATUS.SENT, at: null, startedAt: null, giftCardId: null, error: null, reason: null, source: 'tag', run: 'r9' };
-
-  // A journal without this round (lost, or an older copy): the round state is created, the issue state left alone.
-  const s = fold([found]);
-  assert.deepEqual(s.customers.get(CID).reminders['1'], FOUND_STATE);
+test('fold: used.tag.ok / used.tag.fail record the used-card tag per customer; the latest outcome wins', () => {
+  const u = (entries) => fold(entries).customers.get(CID)?.usedTag;
+  assert.equal(fold([{ op: 'create.start', cid: CID }]).customers.get(CID).usedTag, null, 'nothing attempted yet');
+  // Tagged: the time, the card the tag was added for, no error.
+  const ok = { op: 'used.tag.ok', cid: CID, giftCardId: 'gid://shopify/GiftCard/9', run: 'u1' };
+  assert.deepEqual(u([ok]), { status: USED_TAG_STATUS.TAGGED, at: '2026-10-05T16:00:00.000Z', giftCardId: 'gid://shopify/GiftCard/9', error: null });
+  // Failed: the error is kept (a failure without a message still counts); the next usage run retries.
+  const fail = { op: 'used.tag.fail', cid: CID, giftCardId: 'gid://shopify/GiftCard/9', error: 'tagsAdd rejected: id: Customer not found', run: 'u1' };
+  assert.deepEqual(u([fail]), { status: USED_TAG_STATUS.FAILED, at: '2026-10-05T16:00:00.000Z', giftCardId: 'gid://shopify/GiftCard/9', error: 'tagsAdd rejected: id: Customer not found' });
+  assert.equal(u([{ op: 'used.tag.fail', cid: CID }]).error, 'tag failed');
+  assert.equal(u([{ op: 'used.tag.fail', cid: CID }]).giftCardId, null);
+  // A later ok replaces a failure (and vice versa: only the latest outcome is kept).
+  assert.deepEqual(u([fail, ok]), { status: USED_TAG_STATUS.TAGGED, at: '2026-10-05T16:00:01.000Z', giftCardId: 'gid://shopify/GiftCard/9', error: null });
+  assert.equal(u([ok, fail]).status, USED_TAG_STATUS.FAILED);
+  // The issue state is left alone: a customer only known from a used.tag op stays pending, and a done one stays done.
+  const s = fold([ok]);
   assert.equal(s.customers.get(CID).status, STATUS.PENDING);
   assert.equal(s.customers.get(CID).attempts, 0);
   assert.equal(s.issuingStarted, false);
-  assert.equal(r([{ ...found, run: undefined }]).run, null);
-  // Whatever the journal held for the round that was not "sent" becomes sent.
-  for (const before of [
-    [start],
-    [start, { op: 'remind.unknown', cid: CID, round: 1, error: 'lost' }],
-    [start, { op: 'remind.fail', cid: CID, round: 1, error: 'bad' }],
-    [{ op: 'remind.skip', cid: CID, round: 1, reason: 'no-card', detail: 'x' }],
-  ]) {
-    assert.deepEqual(r([...before, found]), FOUND_STATE, before.map((e) => e.op).join(','));
-  }
-  // A sent row is never touched: its time and card stay.
-  const sent = r([start, { op: 'remind.ok', cid: CID, round: 1 }, found]);
-  assert.equal(sent.status, REMIND_STATUS.SENT);
-  assert.equal(sent.giftCardId, 'g');
-  assert.equal(sent.at, '2026-10-05T16:00:01.000Z');
-  assert.equal(sent.source, undefined);
-  assert.equal(r([found, { ...found, run: 'r10' }]).run, 'r9', 'found twice: the first one stays');
-  // Rounds stay independent; a later skip does not hide it.
-  const rounds = fold([found, { op: 'remind.skip', cid: CID, round: 2, reason: 'used' }, { op: 'remind.skip', cid: CID, round: 1, reason: 'used' }]).customers.get(CID).reminders;
-  assert.equal(rounds['1'].status, REMIND_STATUS.SENT);
-  assert.equal(rounds['2'].status, REMIND_STATUS.SKIPPED);
+  const done = fold([{ op: 'create.start', cid: CID, batch: 1 }, { op: 'create.ok', cid: CID, giftCardId: 'g', batch: 1 }, { op: 'tag.ok', cid: CID }, ok]).customers.get(CID);
+  assert.equal(done.status, STATUS.DONE);
+  assert.equal(done.usedTag.status, USED_TAG_STATUS.TAGGED);
+  assert.equal(done.taggedAt, '2026-10-05T16:00:02.000Z', 'the sent tag time is not the used tag time');
+});
 
-  // remind.tag.fail: the email went out, so the status stays; the error is recorded on the round.
-  const okThenTagFail = [start, { op: 'remind.ok', cid: CID, round: 1 }, { op: 'remind.tag.fail', cid: CID, round: 1, error: 'tagsAdd rejected: locked', run: 'r1' }];
-  const tagFailed = r(okThenTagFail);
-  assert.equal(tagFailed.status, REMIND_STATUS.SENT);
-  assert.equal(tagFailed.at, '2026-10-05T16:00:01.000Z');
-  assert.equal(tagFailed.giftCardId, 'g');
-  assert.equal(tagFailed.tagError, 'tagsAdd rejected: locked');
-  assert.equal(r([start, { op: 'remind.ok', cid: CID, round: 1 }, { op: 'remind.tag.fail', cid: CID, round: 1 }]).tagError, 'tag failed', 'a failure without a message still counts');
-  // remind.tag.ok (a later run added it, or found it in Shopify) clears it.
-  assert.equal(r([...okThenTagFail, { op: 'remind.tag.ok', cid: CID, round: 1, run: 'r2' }]).tagError, null);
-  assert.equal(r([...okThenTagFail, { op: 'remind.tag.ok', cid: CID, round: 1, note: 'already tagged in Shopify' }]).status, REMIND_STATUS.SENT);
-  assert.equal(r([...okThenTagFail, { op: 'remind.tag.ok', cid: CID, round: 1 }, { op: 'remind.tag.fail', cid: CID, round: 1, error: 'again' }]).tagError, 'again');
-  // Only for a round state that exists: nothing is created (no customer, no other round).
-  for (const op of ['remind.tag.fail', 'remind.tag.ok']) {
-    assert.equal(fold([{ op, cid: CID, round: 1, error: 'x' }]).customers.size, 0, op);
-    assert.deepEqual(fold([...okThenTagFail.slice(0, 2), { op, cid: CID, round: 2, error: 'x' }]).customers.get(CID).reminders['2'], undefined, op);
-  }
-  assert.equal(r(okThenTagFail, '2'), undefined);
-  // A new attempt of the round (remind.start) starts without the old tag error.
-  assert.equal(r([...okThenTagFail, { op: 'remind.rejected', cid: CID, round: 1 }, start]).tagError, undefined);
+test('fold: reminder ops of journals written before remind was removed are ignored', () => {
+  const s = fold([
+    { op: 'create.start', cid: CID, batch: 1 },
+    { op: 'create.ok', cid: CID, giftCardId: 'g', batch: 1 },
+    { op: 'tag.ok', cid: CID },
+    { op: 'run.start', run: 'r3', command: 'remind', dryRun: false, options: { round: 1 } },
+    { op: 'remind.start', cid: CID, round: 1, giftCardId: 'g', run: 'r3' },
+    { op: 'remind.ok', cid: CID, round: 1, run: 'r3' },
+    { op: 'remind.tag.fail', cid: CID, round: 1, error: 'x', run: 'r3' },
+    { op: 'remind.found', cid: CID, round: 2, source: 'tag', run: 'r3' },
+    { op: 'remind.skip', cid: 'gid://shopify/Customer/2', round: 1, reason: 'used' },
+    { op: 'run.end', run: 'r3', exitCode: 0, summary: { sent: 1 } },
+  ]);
+  const c = s.customers.get(CID);
+  assert.equal(c.status, STATUS.DONE);
+  assert.equal(c.usedTag, null);
+  assert.equal('reminders' in c, false, 'no reminder state exists any more');
+  assert.equal(s.customers.has('gid://shopify/Customer/2'), false, 'a remind.skip creates no customer state');
+  // The run itself still shows in the run history (its command name as written).
+  assert.deepEqual(s.runs.map((r) => [r.run, r.command, r.exitCode]), [['r3', 'remind', 0]]);
 });
 
 test('campaign: run ids sort by time', () => {

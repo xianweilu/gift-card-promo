@@ -149,20 +149,14 @@ export function loadConfig(env = process.env, { envFile = path.join(ROOT_DIR, '.
     throw new ConfigError(`GIFT_CARD_CURRENCY must be a 3-letter ISO code, got "${giftCardCurrency}"`);
   }
 
-  // Campaign dates, calendar days in the store's time zone. LAUNCH/REMIND dates
-  // gate issue/remind (live campaigns only); the expiry is the last usable day.
+  // Campaign dates, calendar days in the store's time zone. LAUNCH_DATE gates
+  // live issue runs of the real campaign; the expiry is the last usable day and
+  // the day from which issue creates no new card. (Reminders are sent with
+  // Shopify Email, so there are no reminder dates any more.)
   const giftCardExpiresOn = dateValue(env, 'GIFT_CARD_EXPIRES_ON');
   const launchDate = dateValue(env, 'LAUNCH_DATE');
-  const remind1Date = dateValue(env, 'REMIND_1_DATE');
-  const remind2Date = dateValue(env, 'REMIND_2_DATE');
-  const ordered = [['LAUNCH_DATE', launchDate], ['REMIND_1_DATE', remind1Date], ['REMIND_2_DATE', remind2Date]].filter(([, v]) => v);
-  for (let i = 1; i < ordered.length; i += 1) {
-    if (!(ordered[i - 1][1] < ordered[i][1])) {
-      throw new ConfigError(`${ordered[i - 1][0]} (${ordered[i - 1][1]}) must be earlier than ${ordered[i][0]} (${ordered[i][1]})`);
-    }
-  }
-  if (giftCardExpiresOn && ordered.length && ordered[ordered.length - 1][1] > giftCardExpiresOn) {
-    throw new ConfigError(`${ordered[ordered.length - 1][0]} (${ordered[ordered.length - 1][1]}) must not be later than GIFT_CARD_EXPIRES_ON (${giftCardExpiresOn})`);
+  if (giftCardExpiresOn && launchDate && launchDate > giftCardExpiresOn) {
+    throw new ConfigError(`LAUNCH_DATE (${launchDate}) must not be later than GIFT_CARD_EXPIRES_ON (${giftCardExpiresOn})`);
   }
 
   const testCustomerIds = list(env, 'TEST_CUSTOMER_IDS', '').map(customerGid);
@@ -202,8 +196,6 @@ export function loadConfig(env = process.env, { envFile = path.join(ROOT_DIR, '.
     giftCardExpiresOn,
     giftCardTemplateSuffix: str(env, 'GIFT_CARD_TEMPLATE_SUFFIX'),
     launchDate,
-    remind1Date,
-    remind2Date,
     issueMaxPerRun: int(env, 'ISSUE_MAX_PER_RUN', 20000, { min: 1, max: 100000 }),
     testCustomerIds,
     testGiftAmountCents: dollars(env, 'TEST_GIFT_AMOUNT', '0.10', { minCents: 1, maxCents: 2000 }),

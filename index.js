@@ -8,9 +8,9 @@ import { loadConfig, ROOT_DIR } from './src/config.js';
 import { USAGE, parseCommand } from './src/cli.js';
 
 /**
- * First Ctrl+C asks issue/remind to stop after the current customer (they then
- * rewrite the Excel); a second one exits at once. The journal records every
- * step before it happens, so the next run reconciles whatever was cut off.
+ * First Ctrl+C asks issue to stop after the current customer (it then rewrites
+ * the Excel); a second one exits at once. The journal records every step
+ * before it happens, so the next run reconciles whatever was cut off.
  */
 function interruptible() {
   const controller = new AbortController();
@@ -36,7 +36,7 @@ function interruptible() {
   };
 }
 
-/** issue and remind print their own dry-run / live banner; this only makes a test campaign obvious. */
+/** issue prints its own dry-run / live banner; this only makes a test campaign obvious. */
 function modeBanner(config) {
   if (config.testCustomerIds.length) {
     console.info(`测试活动：CAMPAIGN_ID=${config.campaignId}，SENT_TAG=${config.sentTag}，只处理 TEST_CUSTOMER_IDS 里的 ${config.testCustomerIds.length} 个客户`);
@@ -73,15 +73,14 @@ async function runCheck(config) {
   }
   if (!config.testCustomerIds.length) {
     if (/test/i.test(config.giftCardNote)) warnings.push(`GIFT_CARD_NOTE="${config.giftCardNote}" 含 test，正式活动建议改成正式名称`);
-    for (const [key, value] of [['LAUNCH_DATE', config.launchDate], ['REMIND_1_DATE', config.remind1Date], ['REMIND_2_DATE', config.remind2Date]]) {
-      if (!value) warnings.push(`${key} 没有设置`);
-    }
+    if (!config.launchDate) warnings.push('LAUNCH_DATE 没有设置');
   }
 
   const paths = campaignPaths(config);
   console.info(`店铺时区 ${shop.ianaTimezone}，货币 ${shop.currencyCode}`);
   console.info(`活动 ${config.campaignId}${config.testCustomerIds.length ? '（测试活动）' : ''}，发放 tag ${config.sentTag}，DRY_RUN=${config.dryRun}`);
-  console.info(`日期：首封 ${config.launchDate || '未设置'}，第一次提醒 ${config.remind1Date || '未设置'}，第二次提醒 ${config.remind2Date || '未设置'}，到期日 ${config.giftCardExpiresOn || '未设置'}`);
+  console.info(`日期：首封 ${config.launchDate || '未设置'}，到期日 ${config.giftCardExpiresOn || '未设置'}（到期日当天及以后 issue 不再建新卡）`);
+  console.info(`提醒邮件用 Shopify Email 发送：先跑 usage，收件人条件 customer_tags CONTAINS '${config.sentTag}' AND NOT customer_tags CONTAINS '${config.sentTag}-USED'`);
   console.info(`卡的内部备注："${campaignNote(config.giftCardNote, config.campaignId)}"，template suffix："${config.giftCardTemplateSuffix}"`);
   console.info(`活动数据目录：${paths.dir}`);
   console.info(`Excel：${paths.excel}`);
@@ -111,24 +110,6 @@ async function dispatch(args, config) {
           limit: args.limit,
           retryFailed: args.retryFailed,
           repairOnly: args.repairOnly,
-          log,
-          signal: stop.signal,
-        })).exitCode;
-      } finally {
-        stop.dispose();
-      }
-    }
-
-    case 'remind': {
-      const { runRemind } = await import('./src/remind.js');
-      const stop = interruptible();
-      try {
-        return (await runRemind({
-          config,
-          round: args.round,
-          limit: args.limit,
-          retryUnknown: args.retryUnknown,
-          retryFailed: args.retryFailed,
           log,
           signal: stop.signal,
         })).exitCode;

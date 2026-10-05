@@ -5,8 +5,8 @@
 //          a journal with every op type and every stored note / error / detail form,
 //          tags.json, verify.json with every issue type, usage.json with refunds, unmatched
 //          payments and top products, run.end summaries of every command (failures, dry
-//          runs, exotic shapes), unfinished runs while `remind` is running, and .env dates
-//          that changed after select
+//          runs, exotic shapes), the used-card tag (added, failed, retried), an unfinished run
+//          while `issue` is running, and .env dates that changed after select
 //   test   a test campaign (TEST_CUSTOMER_IDS) in another time zone, with unset dates
 //   empty  a live campaign without recipients (rule 11), a single tier, no journal,
 //          minimal usage.json / verify.json, an invalid time zone and a foreign tags.json
@@ -120,12 +120,9 @@ function liveJournal(selection) {
   const I2 = '20261005170000-1';
   const I3 = '20261005180000-1';
   const I4 = '20261006160000-1';
-  const R0 = '20261012150000-1';
-  const R1 = '20261012160000-1';
-  const R1D = '20261012170000-1';
-  const RX = '20261012180000-1';
   const U1 = '20261013170000-1';
   const U2 = '20261013180000-1';
+  const U3 = '20261016160000-1';
   const V1 = '20261014170000-1';
   const V2 = '20261014180000-1';
   const V3 = '20261014190000-1';
@@ -135,15 +132,14 @@ function liveJournal(selection) {
   const X4 = '20261015170300-1';
   const X5 = '20261015170400-1';
   const X6 = '20261015170500-1';
-  const R2 = '20261016160000-1';
   const issueEnd = (fields) => ({
     batch: null, dryRun: false, attempted: 0, created: 0, tagged: 0, tagFixed: 0, reconciled: 0, skipped: {}, failed: 0, rejected: 0,
     unknown: 0, amountCents: 0, tagFailed: 0, reconciledNone: 0, stillUnknown: 0, seqFrom: null, seqTo: null, ...fields,
   });
-  const remindEnd = (fields) => ({
-    round: 1, dryRun: false, eligible: 0, planned: 0, attempted: 0, sent: 0, failed: 0, rejected: 0, unknown: 0, retriedUnknown: 0,
-    retriedFailed: 0, skipped: {}, alreadySent: 0, alreadySentByTag: 0, previouslyFailed: 0, waitingUnknown: 0, notIssued: 0,
-    roundTagged: 0, roundTagFailed: 0, roundTagFixed: 0, roundTagMissing: 0, stopped: null, stoppedByDate: null, ...fields,
+  /** A usage run.end summary as src/usage.js runEndSummary writes it, with `fields` set. */
+  const usageEnd = (fields) => ({
+    issuedCards: 0, usedCards: 0, usedCents: 0, orders: 0, ordersTotalCents: 0, giftCardCents: 0, unmatched: 0,
+    usedTagged: 0, usedTagAdded: 0, usedTagFailed: 0, ...fields,
   });
   const bulkAmount = selection.recipients.find((r) => r.customerId === bulkKept).amountCents;
   /** create.start at 16:mm:01 and create.ok at 16:mm:02 on 10/05 (batch 1). */
@@ -208,7 +204,7 @@ function liveJournal(selection) {
     [T(5, 18, 0, 3), { op: 'reconcile.found', cid: bulkKept, giftCardId: card(1031), last4: 'x031', amountCents: bulkAmount, createdAt: T(5, 16, 30), source: 'verify', run: I3 }],
     [T(5, 18, 0, 4), { op: 'tag.ok', cid: bulkKept, note: 'already tagged in Shopify', run: I3 }],
     [T(5, 18, 0, 5), { op: 'reconcile.none', cid: cust(931), note: '超过 10 分钟仍查不到这张卡，确认未建成，可以重试', run: I3 }],
-    [T(5, 18, 0, 6), { op: 'reconcile.none', cid: cust(932), note: '超过 10 分钟仍查不到这张卡，确认未建成；正式活动从 REMIND_1_DATE（2026-10-12）起不再建新卡', run: I3 }],
+    [T(5, 18, 0, 6), { op: 'reconcile.none', cid: cust(932), note: '超过 10 分钟仍查不到这张卡，确认未建成；礼品卡到期日（2026-10-19）已到，不再建新卡', run: I3 }],
     [T(5, 18, 0, 7), { op: 'reconcile.none', cid: cust(933), note: '超过 90 秒仍查不到这张卡，确认未建成；本次是 --repair-only，不建新卡；之后正常运行 issue 时才会给他建卡', run: I3 }],
     [T(5, 18, 0, 8), { op: 'reconcile.found', cid: cust(934), giftCardId: card(1934), last4: 'x934', amountCents: 1533, source: 'manual', run: I3 }],
     [T(5, 18, 0, 9), { op: 'create.unknown', cid: cust(935), error: '上次运行在建卡途中中断，Shopify 上暂时查不到这张卡', run: I3 }],
@@ -217,54 +213,17 @@ function liveJournal(selection) {
     [T(5, 18, 0, 12), { op: 'create.rejected', cid: cust(938), error: 'HTTP 429 from Shopify 6 times in a row; giving up', run: I3 }],
     [T(5, 18, 0, 13), { op: 'create.unknown', cid: cust(939), error: 'Shopify response contained no data', run: I3 }],
     [T(5, 18, 0, 14), { op: 'create.fail', cid: cust(940), error: 'giftCardCreate returned no payload', run: I3 }],
-    end(I3, T(5, 18, 1), issueEnd({ batch: 3, tagFixed: 2, reconciled: 2, reconciledNone: 3, newCardsRefused: 2, repairOnly: true, stoppedByDate: '2026-10-12' }), 2),
+    end(I3, T(5, 18, 1), issueEnd({ batch: 3, tagFixed: 2, reconciled: 2, reconciledNone: 3, newCardsRefused: 2, repairOnly: true, stoppedByDate: '2026-10-19' }), 2),
 
     // ---- issue batch 4: started, never ended (killed)
     run(I4, T(6, 16, 0), { command: 'issue', dryRun: false, batch: 4, limit: 5, options: { retryFailed: true } }),
     [T(6, 16, 0, 5), { op: 'reconcile.none', cid: cust(16), note: 'verify：开始建卡 10 分钟后仍没在 Shopify 找到这张卡，确认没有建成', run: I4 }],
 
-    // ---- reminders round 1: an older run that never ended, the real run, a dry run
-    run(R0, T(12, 15, 0), { command: 'remind', dryRun: false, batch: null, limit: null, options: { round: 1, retryUnknown: false, retryFailed: false } }),
-    [T(12, 15, 0, 5), { op: 'remind.start', cid: cust(41), round: 1, giftCardId: card(1041), run: R0 }],
-    [T(12, 15, 0, 6), { op: 'remind.unknown', cid: cust(41), round: 1, error: '上次运行在发送这封提醒时中断，不知道是否已发出', run: R0 }],
-    run(R1, T(12, 16, 0), { command: 'remind', dryRun: false, batch: null, limit: null, options: { round: 1, retryUnknown: true, retryFailed: false } }),
-    [T(12, 16, 4, 59), { op: 'remind.start', cid: cust(1), round: 1, giftCardId: card(1001), run: R1 }],
-    [T(12, 16, 5, 0), { op: 'remind.ok', cid: cust(1), round: 1, run: R1 }],
-    [T(12, 16, 5, 10), { op: 'remind.skip', cid: cust(2), round: 1, reason: 'used', detail: '余额 $5.33 / 面额 $15.33', run: R1 }],
-    [T(12, 16, 5, 20), { op: 'remind.start', cid: cust(15), round: 1, giftCardId: card(1015), run: R1 }],
-    [T(12, 16, 5, 50), { op: 'remind.unknown', cid: cust(15), round: 1, error: 'Shopify HTTP 503: Service Unavailable', run: R1 }],
-    [T(12, 16, 6, 0), { op: 'remind.start', cid: cust(14), round: 1, giftCardId: card(1014), run: R1 }],
-    [T(12, 16, 6, 1), { op: 'remind.fail', cid: cust(14), round: 1, error: 'giftCardSendNotificationToCustomer rejected: input: Customer has no email [INVALID]', run: R1 }],
-    [T(12, 16, 6, 30), { op: 'remind.start', cid: cust(41), round: 1, giftCardId: card(1041), retry: true, run: R1 }],
-    [T(12, 16, 6, 31), { op: 'remind.ok', cid: cust(41), round: 1, run: R1 }],
-    [T(12, 16, 6, 32), { op: 'remind.tag.fail', cid: cust(41), round: 1, error: 'Network error calling Shopify: fetch failed', run: R1 }],
-    [T(12, 16, 7, 0), { op: 'remind.found', cid: bulkKept, round: 1, source: 'tag', run: R1 }],
-    [T(12, 16, 7, 10), { op: 'remind.skip', cid: cust(42), round: 1, reason: 'multiple-cards', detail: '2 张卡：x042、1043', run: R1 }],
-    [T(12, 16, 7, 20), { op: 'remind.skip', cid: cust(950), round: 1, reason: 'no-card', detail: 'Shopify 上这位客户名下没有日志记录的卡 1950', run: R1 }],
-    [T(12, 16, 7, 21), { op: 'remind.skip', cid: cust(951), round: 1, reason: 'card-disabled', run: R1 }],
-    [T(12, 16, 7, 22), { op: 'remind.skip', cid: cust(952), round: 1, reason: 'customer-deleted', run: R1 }],
-    [T(12, 16, 7, 23), { op: 'remind.skip', cid: cust(953), round: 1, reason: 'no-email', detail: 'c953@example.org', run: R1 }],
-    [T(12, 16, 7, 24), { op: 'remind.skip', cid: cust(954), round: 1, reason: 'not-subscribed', detail: 'NOT_SUBSCRIBED', run: R1 }],
-    [T(12, 16, 7, 25), { op: 'remind.skip', cid: cust(955), round: 1, reason: 'card-expired', detail: '到期日 2026-10-11', run: R1 }],
-    [T(12, 16, 7, 26), { op: 'remind.skip', cid: cust(956), round: 1, reason: 'no-card', run: R1 }],
-    [T(12, 16, 7, 27), { op: 'remind.start', cid: cust(957), round: 1, giftCardId: card(1957), run: R1 }],
-    [T(12, 16, 7, 28), { op: 'remind.rejected', cid: cust(957), round: 1, error: 'HTTP 429 from Shopify 6 times in a row; giving up', run: R1 }],
-    end(R1, T(12, 16, 8), remindEnd({
-      eligible: 6, planned: 6, attempted: 5, sent: 2, failed: 1, unknown: 1, rejected: 1, retriedUnknown: 1, skipped: { used: 1, 'multiple-cards': 1, 'no-card': 2 },
-      alreadySentByTag: 1, notIssued: 5, roundTagged: 1, roundTagFailed: 1, stopped: 'too-many-failures',
-    }), 1),
-    run(R1D, T(12, 17, 0), { command: 'remind', dryRun: true, batch: null, limit: 3, options: { round: 1 } }),
-    end(R1D, T(12, 17, 0, 9), remindEnd({ dryRun: true, eligible: 2, planned: 2, alreadySent: 3, waitingUnknown: 1, previouslyFailed: 1, roundTagMissing: 1 })),
-    // a reminder run without a round in its options; entries without a round
-    run(RX, T(12, 18, 0), { command: 'remind', dryRun: true, batch: null, limit: null, options: {} }),
-    [T(12, 18, 0, 1), { op: 'remind.found', cid: cust(960), source: 'tag', run: RX }],
-    [T(12, 18, 0, 2), { op: 'remind.tag.fail', cid: cust(961), error: 'tagsAdd returned no payload', run: RX }],
-    [T(12, 18, 0, 3), { op: 'remind.tag.ok', cid: cust(962), run: RX }],
-    end(RX, T(12, 18, 1), remindEnd({ round: undefined, dryRun: true, stopped: 'aborted' }), 130),
-
-    // ---- usage: one run, one failure, exotic summaries
+    // ---- usage: the used-card tag (one added, one refused), a failed run, exotic summaries
     run(U1, T(13, 17, 0), { command: 'usage', dryRun: false, batch: null, limit: null, options: {} }),
-    end(U1, T(13, 17, 1), { issuedCards: 9, usedCards: 2, usedCents: 2033, orders: 2, ordersTotalCents: 8500, giftCardCents: 1833, customerPaidCents: 6667, unmatched: 3 }),
+    [T(13, 17, 0, 30), { op: 'used.tag.ok', cid: cust(1), giftCardId: card(1001), run: U1 }],
+    [T(13, 17, 0, 31), { op: 'used.tag.fail', cid: cust(2), giftCardId: card(1002), error: 'tagsAdd rejected: tags: Tag limit reached [INVALID]', run: U1 }],
+    end(U1, T(13, 17, 1), usageEnd({ issuedCards: 9, usedCards: 2, usedCents: 2033, orders: 2, ordersTotalCents: 8500, giftCardCents: 1833, customerPaidCents: 6667, unmatched: 3, usedTagAdded: 1, usedTagFailed: 1 })),
     run(U2, T(13, 18, 0), { command: 'usage', dryRun: false, batch: null, limit: null, options: {} }),
     end(U2, T(13, 18, 1), { error: 'Network error calling Shopify: fetch failed' }, 1),
 
@@ -295,30 +254,17 @@ function liveJournal(selection) {
     run(X6, T(15, 17, 5), { command: 'usage', dryRun: false, batch: null, limit: null }),
     end(X6, T(15, 17, 5, 1), { message: 'x'.repeat(600) }),
 
-    // ---- reminders round 2: the run in progress (remind holds the run lock in this scenario)
-    run(R2, T(16, 16, 0), { command: 'remind', dryRun: false, batch: null, limit: null, options: { round: 2, retryUnknown: false, retryFailed: true } }),
-    [T(16, 16, 0, 5), { op: 'remind.start', cid: cust(1), round: 2, giftCardId: card(1001), run: R2 }],
-    [T(16, 16, 0, 10), { op: 'remind.start', cid: cust(2), round: 2, giftCardId: card(1002), run: R2 }],
-    [T(16, 16, 0, 11), { op: 'remind.fail', cid: cust(2), round: 2, run: R2 }], // failed without a message
-    [T(16, 16, 0, 20), { op: 'remind.skip', cid: cust(3), round: 2, run: R2 }], // skipped without a reason
-    [T(16, 16, 0, 30), { op: 'remind.skip', cid: cust(14), round: 2, reason: 'not-subscribed', detail: 'UNSUBSCRIBED', run: R2 }],
-    [T(16, 16, 0, 40), { op: 'remind.start', cid: bulkKept, round: 2, giftCardId: card(1031), run: R2 }],
-    [T(16, 16, 0, 41), { op: 'remind.ok', cid: bulkKept, round: 2, run: R2 }],
-    [T(16, 16, 0, 42), { op: 'remind.tag.fail', cid: bulkKept, round: 2, error: 'tagsAdd rejected: tags: Tag limit reached [INVALID]', run: R2 }],
-    [T(16, 16, 0, 50), { op: 'remind.start', cid: cust(41), round: 2, giftCardId: card(1041), run: R2 }],
-    [T(16, 16, 0, 51), { op: 'remind.unknown', cid: cust(41), round: 2, error: '上次运行在发送这封提醒时中断，不知道是否已发出', run: R2 }],
-    [T(16, 16, 1, 0), { op: 'remind.tag.ok', cid: cust(41), round: 1, run: R2 }], // the round-1 tag repaired
-    [T(16, 16, 1, 1), { op: 'remind.tag.ok', cid: cust(963), round: 1, note: 'already tagged in Shopify', run: R2 }],
-    [T(16, 16, 1, 2), { op: 'remind.tag.ok', cid: cust(964), round: 1, note: 'customer deleted', run: R2 }],
-    [T(16, 16, 1, 3), { op: 'remind.skip', cid: cust(42), round: 2, reason: 'card-expired', detail: '到期日 2026-10-15', run: R2 }],
-    [T(16, 16, 1, 4), { op: 'remind.start', cid: cust(15), round: 2, giftCardId: card(1015), retry: true, run: R2 }],
-    [T(16, 16, 1, 5), { op: 'remind.rejected', cid: cust(15), round: 2, error: 'HTTP 429 from Shopify 6 times in a row; giving up', run: R2 }],
+    // ---- usage again: the refused tag added on retry (a failure without a message too)
+    run(U3, T(16, 16, 0), { command: 'usage', dryRun: false, batch: null, limit: null, options: {} }),
+    [T(16, 16, 0, 5), { op: 'used.tag.ok', cid: cust(2), giftCardId: card(1002), run: U3 }],
+    [T(16, 16, 0, 6), { op: 'used.tag.fail', cid: cust(8), giftCardId: card(1999), run: U3 }],
+    end(U3, T(16, 16, 1), usageEnd({ issuedCards: 9, usedCards: 3, usedCents: 2533, orders: 3, ordersTotalCents: 9700, giftCardCents: 2333, unmatched: 3, usedTagged: 1, usedTagAdded: 1, usedTagFailed: 1 })),
 
     // ---- entries whose run.start is missing, and an op this version does not know
     [T(16, 17, 0), { op: 'tag.ok', cid: cust(980), run: 'gone' }],
     [T(16, 17, 0, 1), { op: 'reconcile.found', cid: cust(981), giftCardId: card(1981), source: 'verify', run: 'gone' }],
     [T(16, 17, 0, 2), { op: 'future.op', cid: cust(982), note: 'something new', run: 'gone' }],
-    [T(16, 17, 0, 3), { op: 'remind.ok', cid: cust(983), round: 2, run: 'gone' }],
+    [T(16, 17, 0, 3), { op: 'used.tag.ok', cid: cust(983), giftCardId: card(1983), run: 'gone' }],
   ];
 }
 
@@ -430,6 +376,8 @@ function liveUsage(selection) {
       ],
       topProducts: products.map((name, i) => ({ name, quantity: 20 - i, amountCents: 10_000 - i * 500 })),
     },
+    // c14 carries the tag in Shopify without a journal line (tagged by hand); c8's tagsAdd failed
+    usedTag: { tag: 'gift-card-sent-2026-10-USED', taggedCustomerIds: [cust(1), cust(2), cust(14)] },
   };
 }
 
@@ -453,16 +401,24 @@ function testJournal(selection) {
     ['2026-10-03T17:00:03.000Z', { op: 'tag.ok', cid: cust(1), run: R1 }],
     ['2026-10-03T17:00:04.000Z', { op: 'skip', cid: cust(2), reason: 'not-subscribed', detail: 'PENDING', batch: 1, run: R1 }],
     ['2026-10-03T17:00:05.000Z', { op: 'run.end', run: R1, summary: { batch: 1, dryRun: false, attempted: 1, created: 1, tagged: 1, skipped: { 'not-subscribed': 1 }, amountCents: amount(1), seqFrom: 1, seqTo: 2 }, exitCode: 0 }],
-    ['2026-10-03T18:00:00.000Z', { op: 'run.start', run: R2, command: 'remind', dryRun: false, batch: null, limit: null, options: { round: 1 } }],
-    ['2026-10-03T18:00:01.000Z', { op: 'remind.start', cid: cust(1), round: 1, giftCardId: card(7001), run: R2 }],
-    ['2026-10-03T18:00:02.000Z', { op: 'remind.ok', cid: cust(1), round: 1, run: R2 }],
-    ['2026-10-03T18:00:03.000Z', { op: 'remind.found', cid: cust(2), run: R2 }],
-    ['2026-10-03T18:00:04.000Z', { op: 'remind.tag.ok', cid: cust(2), run: R2 }],
-    ['2026-10-03T18:00:05.000Z', { op: 'run.end', run: R2, summary: { round: 1, dryRun: false, eligible: 1, planned: 1, attempted: 1, sent: 1, alreadySentByTag: 1 }, exitCode: 0 }],
+    // usage without a usage.json left behind (the file is from another day): the used tag comes from the journal alone
+    ['2026-10-03T18:00:00.000Z', { op: 'run.start', run: R2, command: 'usage', dryRun: false, batch: null, limit: null, options: {} }],
+    ['2026-10-03T18:00:01.000Z', { op: 'used.tag.ok', cid: cust(1), giftCardId: card(7001), run: R2 }],
+    ['2026-10-03T18:00:02.000Z', { op: 'run.end', run: R2, summary: { issuedCards: 1, usedCards: 1, usedCents: 500, orders: 1, ordersTotalCents: 2000, giftCardCents: 500, unmatched: 0, usedTagged: 0, usedTagAdded: 1, usedTagFailed: 0 }, exitCode: 0 }],
   ];
 }
 
 const toEntries = (items) => items.map(([t, entry]) => ({ t, ...entry }));
+
+/**
+ * The frozen lists stay "old-style" on purpose: notSelected[] without the `reasons` field a newer
+ * select writes, so the English edition keeps being tested on the stored Chinese texts
+ * (test/excel-en.test.js patches the field in for the new-style case).
+ */
+function asOldStyleList(selection) {
+  for (const n of selection.notSelected ?? []) delete n.reasons;
+  return selection;
+}
 
 /**
  * The three scenarios with every input file, built with the real select rules.
@@ -477,15 +433,15 @@ export async function buildScenarioInputs() {
     const env = testConfig();
     try {
       const data = liveCustomers();
-      const selection = await selectionFixture(env.config, { ...data, write: false });
+      const selection = asOldStyleList(await selectionFixture(env.config, { ...data, write: false }));
       // A Chinese channel label as an older select wrote it, and an empty key: both must read.
       selection.funnel.channels = { ...selection.funnel.channels, 网店: 2, 新版结账: 1 };
       selection.funnel.relayDomains = { ...selection.funnel.relayDomains, '': 1 };
       scenarios.push({
         name: 'live',
         env: {},
-        configPatch: { remind1Date: '2026-10-13', remind2Date: '2026-10-17', giftCardExpiresOn: '2026-10-20' },
-        running: 'remind',
+        configPatch: { giftCardExpiresOn: '2026-10-20' },
+        running: 'issue',
         selection,
         journal: toEntries(liveJournal(selection)),
         tags: liveTags(),
@@ -502,13 +458,13 @@ export async function buildScenarioInputs() {
     const envVars = { CAMPAIGN_ID: '2026-10-test', TEST_CUSTOMER_IDS: '1,2,3,4', SENT_TAG: 'OCT26RTPROMO-TEST' };
     const env = testConfig(envVars);
     try {
-      const selection = buildTestSelection({
+      const selection = asOldStyleList(buildTestSelection({
         config: env.config,
         customers: testCustomers().map(parseCustomer),
         timezone: TZ,
         createdAt: NOW_ISO,
         snapshot: { exportedAt: NOW_ISO, count: 4 },
-      });
+      }));
       selection.params.timezone = 'Asia/Shanghai';
       selection.params.giftCardExpiresOn = '';
       scenarios.push({
@@ -533,7 +489,7 @@ export async function buildScenarioInputs() {
     const env = testConfig(envVars);
     try {
       const customers = [makeCustomer({ n: 1, createdAt: '2025-02-01T00:00:00Z' }), makeCustomer({ n: 2, marketingState: 'UNSUBSCRIBED' })];
-      const selection = await selectionFixture(env.config, { customers, write: false });
+      const selection = asOldStyleList(await selectionFixture(env.config, { customers, write: false }));
       selection.params.timezone = 'Mars/Olympus_Mons';
       scenarios.push({
         name: 'empty',

@@ -1,20 +1,28 @@
-// The `usage` command: a read-only daily report of how the campaign's gift
-// cards are being used.
+// The `usage` command: a daily report of how the campaign's gift cards are
+// being used, plus one write: the used-card tag.
 //
 //   1. List every campaign card (note carries [campaign:<id>]) with its initial
 //      value and current balance: balance < initial means the card was used.
-//   2. List the orders paid with a gift card since one hour before the list was
+//   2. Tag the customer of every used card with "<SENT_TAG>-USED" (usedTagName),
+//      unless Shopify already shows the tag on them. The reminders are sent with
+//      Shopify Email, whose segment leaves these customers out:
+//        customer_tags CONTAINS '<SENT_TAG>' AND NOT customer_tags CONTAINS '<SENT_TAG>-USED'
+//      Journal: used.tag.ok / used.tag.fail per customer. A failure is only a
+//      warning; the next run re-reads the tag set and tries again. Adding the
+//      tag is idempotent and harmless, so DRY_RUN does not gate it.
+//   3. List the orders paid with a gift card since one hour before the list was
 //      made (no campaign card can be older; see campaignStart). Each gift-card
 //      transaction's receiptJson names the card (gift_card_id), which ties the
 //      payment to a campaign card. SALE/CAPTURE take money from the card,
 //      REFUND puts it back.
-//   3. Write usage.json (latest) plus usage/<YYYY-MM-DD>.json (the store-local
+//   4. Write usage.json (latest) plus usage/<YYYY-MM-DD>.json (the store-local
 //      date of the run) for the daily trend, print a short Chinese summary and
 //      regenerate the Excel (src/report/excel.js reads usage.json for the
-//      使用报告 / 使用明细 sheets).
+//      使用报告 / 使用明细 sheets and the 用卡 tag column).
 //
-// Nothing is written to Shopify. Rates in usage.json are fractions (0.25 = 25%),
-// rounded to 4 decimal places; money is integer cents.
+// Apart from the used-card tag nothing is written to Shopify: no card is created,
+// changed or disabled. Rates in usage.json are fractions (0.25 = 25%), rounded to
+// 4 decimal places; money is integer cents.
 //
 // Two views of the money, on purpose:
 //   - the cards' ledger (payments[].netCents, orders[].campaignCardCents) is net
@@ -40,11 +48,26 @@ import { connect } from './connect.js';
 import { gql } from './shopify.js';
 import { GIFT_CARD_ORDERS } from './queries.js';
 import { findCampaignCards } from './giftcards.js';
+import { fetchTaggedCustomerIds, addTag } from './customers.js';
 import { localDate, localDateTime } from './time.js';
 import { formatUsd, tierLabel } from './select/amount.js';
 
 export const USAGE_VERSION = 1;
 export const NO_RECEIPT_ID_REASON = '回执里没有礼品卡 ID';
+
+/**
+ * The tag usage puts on the customer of every used card: "<SENT_TAG>-USED"
+ * (OCT26RTPROMO → OCT26RTPROMO-USED; a test campaign's OCT26RTPROMO-TEST2 →
+ * OCT26RTPROMO-TEST2-USED). src/report/excel.js names the same tag.
+ */
+export function usedTagName(sentTag) {
+  return `${sentTag}-USED`;
+}
+
+/** The Shopify Email segment condition that reaches only the people who have not used their card. */
+export function reminderSegmentCondition(sentTag) {
+  return `customer_tags CONTAINS '${sentTag}' AND NOT customer_tags CONTAINS '${usedTagName(sentTag)}'`;
+}
 
 const HOUR_MS = 3_600_000;
 const DAY_MS = 86_400_000;
@@ -447,9 +470,11 @@ function consistencyWarnings({ cards, payments, recipients, truncatedItems, trun
  * @param {number} a.campaignStartMs first day of `daily` (campaignStart().startMs)
  * @param {string} a.campaignStartIso start of the orders search window (campaignStart().campaignStartIso)
  * @param {string} a.fetchedAt ISO time the data was read ("today" for `daily`)
+ * @param {{ tag: string, taggedCustomerIds: Iterable<string> }|null} [a.usedTag] the used-card tag and the
+ *   customers carrying it after this run (tagUsedCards() result); null when the step did not run
  * @returns {{ usage: object, warnings: string[] }}
  */
-export function buildUsage({ selection, cards, orderNodes, timezone, campaignStartMs, campaignStartIso, fetchedAt }) {
+export function buildUsage({ selection, cards, orderNodes, timezone, campaignStartMs, campaignStartIso, fetchedAt, usedTag = null }) {
   const recipients = new Map((selection.recipients ?? []).map((r) => [r.customerId, r]));
   const usageCards = cards.map(toUsageCard).sort((a, b) => timeOf(a.createdAt) - timeOf(b.createdAt) || compareGid(a.giftCardId, b.giftCardId));
   const cardById = new Map(usageCards.map((c) => [c.giftCardId, c]));
@@ -525,8 +550,57 @@ export function buildUsage({ selection, cards, orderNodes, timezone, campaignSta
     orders,
     unmatched,
     summary,
+    // The used-card tag and who carries it after this run (src/report/excel.js: 用卡 tag column).
+    usedTag: usedTag ? { tag: usedTag.tag, taggedCustomerIds: [...new Set(usedTag.taggedCustomerIds)].sort(compareGid) } : null,
   };
   return { usage, warnings: consistencyWarnings({ cards: usageCards, payments, recipients, truncatedItems, truncatedTransactions }) };
+}
+
+// ---------------------------------------------------------------------------
+// The used-card tag (the one write of this command)
+// ---------------------------------------------------------------------------
+
+/**
+ * Add "<SENT_TAG>-USED" to the customer of every used card (balance below face value) who does not
+ * carry it in Shopify yet. Idempotent: the tag set is read from Shopify first, so a second run adds
+ * nothing; a failed tagsAdd is journalled (used.tag.fail), warned about and retried by the next run.
+ * One tagsAdd per customer, whatever the number of their used cards.
+ *
+ * @param {object} a
+ * @param {object[]} a.cards findCampaignCards() result
+ * @param {string} a.tag usedTagName(config.sentTag)
+ * @param {string} a.journal paths.journal
+ * @param {string} a.run this run's id
+ * @param {() => string} a.nowIso journal time
+ * @param {{ info: Function, warn: Function }} a.log
+ * @returns {Promise<{ tag: string, taggedCustomerIds: Set<string>, tagged: number, added: number, failed: number }>}
+ *   taggedCustomerIds: everyone carrying the tag after this run (Shopify's set plus the ones added now);
+ *   tagged: customers who already carried it; added / failed: this run's tagsAdd results.
+ */
+export async function tagUsedCards({ cards, tag, journal, run, nowIso, log }) {
+  const tagged = await fetchTaggedCustomerIds(tag);
+  const result = { tag, taggedCustomerIds: new Set(tagged), tagged: tagged.size, added: 0, failed: 0 };
+  // Used cards whose customer is known and not tagged yet, one entry per customer (first card wins).
+  const toTag = new Map();
+  for (const c of cards) {
+    const used = Number.isFinite(c.balanceCents) && Number.isFinite(c.amountCents) && c.balanceCents < c.amountCents;
+    if (!used || !c.customerId || tagged.has(c.customerId) || toTag.has(c.customerId)) continue;
+    toTag.set(c.customerId, c.id);
+  }
+  for (const [cid, giftCardId] of toTag) {
+    try {
+      await addTag(cid, tag);
+      appendJournal(journal, { op: 'used.tag.ok', cid, giftCardId, run }, { now: nowIso });
+      result.taggedCustomerIds.add(cid);
+      result.added += 1;
+    } catch (err) {
+      const error = err?.message ?? String(err);
+      appendJournal(journal, { op: 'used.tag.fail', cid, giftCardId, error, run }, { now: nowIso });
+      log.warn(`  给客户 ${cid.split('/').pop()} 打 ${tag} 失败：${error}。下次运行 usage 会再试`);
+      result.failed += 1;
+    }
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -547,13 +621,14 @@ function journalWarnings(state, usage) {
   return [`本地日志里有 ${count(missing.length)} 张卡没有出现在 Shopify 的本活动卡列表里（例如 ${missing[0].giftCardId}），这份报告没有计入它们；请运行 verify 核对`];
 }
 
-function printSummary(usage, log) {
+function printSummary(usage, usedTag, log) {
   const s = usage.summary;
   log.info(`使用情况（截至 ${localDateTime(Date.parse(usage.fetchedAt), usage.timezone)}，${zoneLabel(usage.timezone)}）`);
   log.info(`  发出礼品卡：${count(s.issuedCards)} 张，面额 ${formatUsd(s.issuedCents)}`);
   log.info(`  已经使用：${count(s.usedCards)} 张，占 ${percentText(s.usedCards, s.issuedCards)}；已用 ${formatUsd(s.usedCents)}，占面额 ${percentText(s.usedCents, s.issuedCents)}`);
   log.info(`  带来订单：${count(s.orders)} 笔，订单总额 ${formatUsd(s.ordersTotalCents)}，平均每单 ${formatUsd(s.avgOrderCents)}`);
   log.info(`    其中礼品卡抵扣 ${formatUsd(s.giftCardCents)}，顾客另外支付 ${formatUsd(s.customerPaidCents)}`);
+  log.info(`  已打用卡 tag ${usedTag.tag}：${count(usedTag.taggedCustomerIds.size)} 人（之前已带 ${count(usedTag.tagged)}，本次新打 ${count(usedTag.added)}，失败 ${count(usedTag.failed)}）`);
   const cancelled = usage.orders.filter((o) => o.cancelled).length;
   if (cancelled) log.info(`  另有 ${count(cancelled)} 笔已取消的订单用过本活动的卡：列在使用明细里，不计入订单数和金额`);
   if (usage.unmatched.length) {
@@ -562,7 +637,7 @@ function printSummary(usage, log) {
 }
 
 /** What run.end records for the Excel's run log. */
-function runEndSummary(usage) {
+function runEndSummary(usage, usedTag) {
   const s = usage.summary;
   return {
     issuedCards: s.issuedCards,
@@ -572,6 +647,9 @@ function runEndSummary(usage) {
     ordersTotalCents: s.ordersTotalCents,
     giftCardCents: s.giftCardCents,
     unmatched: usage.unmatched.length,
+    usedTagged: usedTag.tagged, // already carried the used-card tag
+    usedTagAdded: usedTag.added,
+    usedTagFailed: usedTag.failed,
   };
 }
 
@@ -591,8 +669,9 @@ async function refreshExcel(writeReport, { config, paths, log, now }) {
 }
 
 /**
- * node index.js usage — read-only daily usage report.
- * Exit codes: 0 done; 1 no selection, another command running, or Shopify/file error.
+ * node index.js usage — daily usage report; also tags the customers of used cards (see the header).
+ * Exit codes: 0 done (a failed used-card tag is only a warning); 1 no selection, another command
+ * running, or Shopify/file error.
  * Returns { exitCode, usage } (usage is null unless exitCode is 0).
  */
 export async function runUsage({ config, log = console, now = () => new Date(), sleep, writeReport = defaultWriteReport } = {}) {
@@ -622,7 +701,7 @@ export async function runUsage({ config, log = console, now = () => new Date(), 
     return { exitCode: 1, usage: null };
   }
 
-  // select / issue / remind / verify / usage never run at the same time.
+  // select / issue / verify / usage never run at the same time.
   let release;
   try {
     release = acquireRunLock(paths, 'usage');
@@ -648,6 +727,13 @@ export async function runUsage({ config, log = console, now = () => new Date(), 
     log.info('正在读取本活动的礼品卡和余额…');
     const cards = await findCampaignCards({ campaignId: config.campaignId, sinceIso: cardSearchSince(selection) });
     log.info(`  本活动的卡 ${count(cards.length)} 张`);
+
+    // The one write of this command: the used-card tag, so the Shopify Email reminder segment can
+    // leave these customers out. Not gated by DRY_RUN (idempotent, harmless).
+    const usedTag = usedTagName(config.sentTag);
+    log.info(`正在给用过卡（余额小于面额）的客户打 tag ${usedTag}（不受 DRY_RUN 影响）。提醒邮件用 Shopify Email 发送，收件人条件：${reminderSegmentCondition(config.sentTag)}`);
+    const usedTagResult = await tagUsedCards({ cards, tag: usedTag, journal: paths.journal, run, nowIso, log });
+
     // Needs the cards: the daily table starts at the earlier of the first live issue run and the oldest card.
     const start = campaignStart({ runs: state.runs, cards, selection });
     const since = `${localDateTime(Date.parse(start.campaignStartIso), timezone)}（${zoneLabel(timezone)}）`;
@@ -663,16 +749,17 @@ export async function runUsage({ config, log = console, now = () => new Date(), 
       campaignStartMs: start.startMs,
       campaignStartIso: start.campaignStartIso,
       fetchedAt,
+      usedTag: usedTagResult,
     });
     writeJsonAtomic(paths.usage, built.usage);
     const snapshotFile = path.join(paths.usageDir, `${localDate(Date.parse(fetchedAt), timezone)}.json`);
     writeJsonAtomic(snapshotFile, built.usage);
     usage = built.usage;
 
-    printSummary(usage, log);
+    printSummary(usage, usedTagResult, log);
     for (const w of [...built.warnings, ...journalWarnings(state, usage)]) log.warn(w);
     log.info(`已保存 ${paths.usage}，当天快照 ${snapshotFile}`);
-    runSummary = runEndSummary(usage);
+    runSummary = runEndSummary(usage, usedTagResult);
     exitCode = 0;
   } catch (err) {
     log.error(`usage 没有完成：${err.message}`);

@@ -1,7 +1,7 @@
 // English renderings of the texts our commands store in Chinese in the data files
 // (selection.json, journal.jsonl, usage.json, run summaries), for TEXT.en.stored of
 // ./text.js. Every form our own code writes is listed here (src/select/rules.js,
-// src/select/amount.js, src/issue.js, src/remind.js, src/verify.js, src/usage.js);
+// src/select/amount.js, src/issue.js, src/verify.js, src/usage.js);
 // anything else is returned unchanged, so an unknown text never breaks the report.
 // No I/O here.
 
@@ -199,13 +199,15 @@ function durationEn(text) {
   return `${n} ${unit}${n === 1 ? '' : 's'}`;
 }
 
-const REMIND_1_NO_NEW_CARDS = /^正式活动从 REMIND_1_DATE（([^）]*)）起不再建新卡$/;
+// issue.js noNewCardsText: from the cards' expiry date on, no new card is created
+const EXPIRY_NO_NEW_CARDS = /^礼品卡到期日（([^）]*)）已到，不再建新卡$/;
+const expiryNoNewCardsEn = (m) => `the gift card expiry date (${m[1]}) has arrived; no new cards are created`;
 const REPAIR_ONLY_NO_REISSUE = '本次是 --repair-only，不建新卡；之后正常运行 issue 时才会给他建卡';
 
 /** The tail of an issue reconcile.none note after "确认未建成；" (why no new card follows). */
 function noReissueEn(tail) {
-  const m = REMIND_1_NO_NEW_CARDS.exec(tail);
-  if (m) return `from REMIND_1_DATE (${m[1]}) on the live campaign creates no new cards`;
+  const m = EXPIRY_NO_NEW_CARDS.exec(tail);
+  if (m) return expiryNoNewCardsEn(m);
   if (tail === REPAIR_ONLY_NO_REISSUE) return 'this run is --repair-only and creates no new cards; a later normal issue run will create it';
   return null;
 }
@@ -219,10 +221,6 @@ const EXACT = new Map([
   // issue.js create.unknown: the error's message was missing, and the part before the lookup error
   ['未知错误', 'unknown error'],
   ['查卡也失败了', 'the card lookup failed too'],
-  // remind.js remind.unknown (INTERRUPTED_ERROR)
-  ['上次运行在发送这封提醒时中断，不知道是否已发出', 'The previous run was interrupted while sending this reminder; unknown whether it went out'],
-  // remind.js remind.tag.ok notes (NOTE_LABELS covers 'already tagged in Shopify')
-  ['customer deleted', 'Customer deleted'],
   // usage.js unmatched[].reason and the product-name stand-in
   ['回执里没有礼品卡 ID', 'No gift card ID in the receipt'],
   ['回执里没有礼品卡 ID（退款）', 'No gift card ID in the receipt (refund)'],
@@ -240,13 +238,8 @@ const PATTERNS = [
   }],
   // verify.js reconcile.none: "verify：开始建卡 10 分钟后仍没在 Shopify 找到这张卡，确认没有建成"
   [/^verify：开始建卡 (\d+ (?:分钟|秒))后仍没在 Shopify 找到这张卡，确认没有建成$/, (m) => `verify: card not found in Shopify ${durationEn(m[1])} after creation started; confirmed not created`],
-  // remind.js remind.skip details
-  [/^余额 (\S+) \/ 面额 (\S+)$/, (m) => `balance ${m[1]} / face value ${m[2]}`],
-  [/^到期日 (\S+)$/, (m) => `expiry date ${m[1]}`],
-  [/^(\d+) 张卡：([\s\S]*)$/, (m) => `${m[1]} cards: ${m[2].split('、').join(', ')}`],
-  [/^Shopify 上这位客户名下没有日志记录的卡 (\S+)$/, (m) => `Shopify has no card ${m[1]} (the one in the journal) under this customer`],
   // issue.js noNewCardsText on its own (a part of an error or note)
-  [REMIND_1_NO_NEW_CARDS, (m) => `from REMIND_1_DATE (${m[1]}) on the live campaign creates no new cards`],
+  [EXPIRY_NO_NEW_CARDS, expiryNoNewCardsEn],
   // verify.js summary.text: the English line is built from the counters (stored.summaryText → null), but
   // the `text` key itself still reaches the line through labels.js summaryValue, so it reads English too.
   [/^卡 (\d+) 张，发现 (\d+) 条，补记日志 (\d+) 条$/, (m) => `${m[1]} cards, ${m[2]} ${m[2] === "1" ? "issue" : "issues"} found, ${m[3]} journal ${m[3] === "1" ? "entry" : "entries"} added`],

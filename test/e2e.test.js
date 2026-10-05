@@ -1,8 +1,9 @@
 // A whole campaign against the fake store, through the real command functions
 // and the real Excel writer: select → issue (date guard, dry run, batches, a
-// lost response) → reminders → usage → verify → export. Checks the promises
-// that matter most: one card per person, at most one reminder per person per
-// round, only unused cards reminded, and an Excel that reflects every step.
+// lost response) → usage → verify → export. Checks the promises that matter
+// most: one card per person, no card on or after the expiry date, and an Excel
+// that reflects every step. (Reminders are sent with Shopify Email, outside
+// this tool; usage tags the customers who used their card.)
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -14,7 +15,6 @@ import { campaignPaths, readJson, readJournal, foldJournal } from '../src/campai
 import { resetClient } from '../src/shopify.js';
 import { runSelect } from '../src/select/index.js';
 import { runIssue } from '../src/issue.js';
-import { runRemind } from '../src/remind.js';
 import { runUsage } from '../src/usage.js';
 import { runVerify } from '../src/verify.js';
 import { runExport } from '../src/export-command.js';
@@ -109,7 +109,6 @@ test('e2e: a whole campaign with the real commands and the real Excel', { timeou
   ];
   const fake = installFakeShopify({ customers, orders: [makeActiveOrder({ n: 801, customer: busy, createdAt: '2026-09-15T12:00:00Z' })], now: () => nowMs });
   const creates = () => fake.opsNamed('GiftCardCreate').length;
-  const notifies = () => fake.state.calls.notify.length;
   const cardOf = (n) => fake.state.giftCards.filter((g) => g.customer?.id === cid(n));
 
   try {
@@ -171,22 +170,6 @@ test('e2e: a whole campaign with the real commands and the real Excel', { timeou
       lineItems: [{ name: 'Gold Balloon Arch', sku: 'ARCH-1', quantity: 1, amount: '40.00' }],
     }));
 
-    // ---- reminders: the date guard, then round 1 on 10/12 ------------------------
-    at('2026-10-11T17:00:00Z');
-    assert.equal((await runRemind({ config, round: 1, log, now, sleep })).exitCode, 2, 'round 1 is refused before REMIND_1_DATE');
-    assert.equal(notifies(), 0);
-    at('2026-10-12T17:00:00Z');
-    ok(await runRemind({ config: dryConfig, round: 1, log, now, sleep }), 'dry-run remind');
-    assert.equal(notifies(), 0, 'a dry run sends nothing');
-    bothWorkbooks('dry-run remind');
-    ok(await runRemind({ config, round: 1, log, now, sleep }), 'remind --round 1');
-    const unusedIds = [2, 3, 6, 4].map((n) => cardOf(n)[0].id);
-    assert.deepEqual(fake.state.calls.notify, unusedIds, 'only unused cards, in list order');
-    bothWorkbooks('remind --round 1');
-    ok(await runRemind({ config, round: 1, log, now, sleep }), 'remind --round 1 again');
-    assert.equal(notifies(), 4, 'round 1 is sent at most once per person');
-    bothWorkbooks('remind --round 1 again');
-
     // ---- 10/13 usage --------------------------------------------------------------
     at('2026-10-13T17:00:00Z');
     ok(await runUsage({ config, log, now }), 'usage');
@@ -201,15 +184,14 @@ test('e2e: a whole campaign with the real commands and the real Excel', { timeou
     assert.ok(fs.existsSync(path.join(paths.usageDir, '2026-10-13.json')));
     bothWorkbooks('usage');
 
-    // ---- 10/16 round 2: customer 3 has unsubscribed meanwhile ----------------------
-    fake.state.customers.find((c) => c.id === cid(3)).defaultEmailAddress.marketingState = 'UNSUBSCRIBED';
-    at('2026-10-16T17:00:00Z');
-    ok(await runRemind({ config, round: 2, log, now, sleep }), 'remind --round 2');
-    assert.deepEqual(fake.state.calls.notify.slice(4), [2, 6, 4].map((n) => cardOf(n)[0].id));
-    const reminders = foldJournal(readJournal(paths.journal)).customers;
-    assert.equal(reminders.get(cid(1)).reminders['1'].reason, 'used');
-    assert.equal(reminders.get(cid(3)).reminders['2'].reason, 'not-subscribed');
-    bothWorkbooks('remind --round 2');
+    // ---- 10/19 (the expiry date): issue creates nothing any more, only repairs -----------
+    at('2026-10-19T17:00:00Z');
+    const beforeExpiry = creates();
+    const onExpiry = await runIssue({ config, limit: 10, log, now, sleep });
+    assert.equal(onExpiry.exitCode, 0, 'nobody is waiting for a card, so the repairs-only run is fine');
+    assert.equal(creates(), beforeExpiry, 'no card on the expiry date');
+    assert.ok(log.lines.some((l) => l.includes('已到礼品卡到期日（2026-10-19）：只补记和补打 tag，不建新卡')), log.lines.slice(-20).join('\n'));
+    bothWorkbooks('issue on the expiry date');
 
     // ---- verify and export ------------------------------------------------------------
     ok(await runVerify({ config, log, now }), 'verify');
@@ -239,9 +221,7 @@ test('e2e: a whole campaign with the real commands and the real Excel', { timeou
     assert.deepEqual(list.rows.map((r) => r['状态']), ['已完成', '已完成', '已完成', '已完成', '已完成']);
     assert.deepEqual(list.rows.map((r) => r['是否有 OCT26RTPROMO']), ['是', '是', '是', '是', '是']);
     assert.deepEqual(list.rows.map((r) => r['礼品卡金额']), ['15.33', '10.77', '19.77', '10.77', '19.77']);
-    assert.equal(list.rows[0]['第 1 次提醒'], '跳过：已用过卡');
-    assert.ok(list.rows.slice(1).every((r) => r['第 1 次提醒'].startsWith('已发 ')), list.rows.map((r) => r['第 1 次提醒']).join(' | '));
-    assert.equal(list.rows[2]['第 2 次提醒'], '跳过：未订阅营销邮件');
+    assert.ok(!list.header.some((h) => /提醒/.test(h)), `no reminder columns: ${list.header.join(' | ')}`);
     assert.equal(list.rows[0]['已使用金额'], '5');
     const usedSheet = table(wb.getWorksheet('使用明细'), '订单号');
     assert.equal(usedSheet.rows.length, 1);

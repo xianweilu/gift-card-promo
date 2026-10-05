@@ -370,7 +370,7 @@ function lockFileHint(file) {
 }
 
 /**
- * select / issue / remind / verify / usage are mutually exclusive. Throws LockError naming the
+ * select / issue / verify / usage are mutually exclusive. Throws LockError naming the
  * running command; a lock left behind by a dead process is removed silently.
  */
 export function acquireRunLock(paths, command) {
@@ -510,24 +510,16 @@ export function readJournal(file) {
  *   skipped      发放前跳过       pre-flight found the customer no longer qualifies
  */
 /**
- * Reminder status per customer and round ('1' | '2'):
- *   in_progress  进行中       remind.start written, no outcome yet
- *   sent         已发          Shopify accepted the re-send (remind.ok), or the customer carries the
- *                              round tag in Shopify while the journal had no send (remind.found:
- *                              source 'tag', at null — the journal was lost or rolled back)
- *   failed       失败          userErrors (not retried automatically)
- *   unknown      结果不明      the answer was lost: NEVER re-sent automatically (--retry-unknown)
- *   skipped      跳过          not eligible this round (used card, unsubscribed, ...)
- *   (absent)     not attempted yet; remind.rejected also returns a row to this state
- * A sent row may carry `tagError`: adding the round tag after the send failed (remind.tag.fail);
- * remind.tag.ok (the tag repaired, or found in Shopify after all) clears it.
+ * Used-card tag per customer (`usedTag`, written by usage: used.tag.ok / used.tag.fail):
+ *   { status: 'tagged' | 'failed', at, giftCardId, error }   or null when usage never tried.
+ * usage adds "<SENT_TAG>-USED" to the customer of every card whose balance is below its face
+ * value, so a Shopify Email segment can leave them out of the reminders. A failed attempt is
+ * retried by the next usage run (it re-reads the tag set from Shopify), so 'failed' is only
+ * the latest outcome; a later used.tag.ok replaces it.
  */
-export const REMIND_STATUS = Object.freeze({
-  IN_PROGRESS: 'in_progress',
-  SENT: 'sent',
+export const USED_TAG_STATUS = Object.freeze({
+  TAGGED: 'tagged',
   FAILED: 'failed',
-  UNKNOWN: 'unknown',
-  SKIPPED: 'skipped',
 });
 
 export const STATUS = Object.freeze({
@@ -555,7 +547,7 @@ function blankState() {
     error: null,
     skipReason: null,
     reconciledFrom: null,
-    reminders: {}, // { '1': { status, startedAt, at, giftCardId, error, reason, detail, source?, tagError? }, '2': {...} }
+    usedTag: null, // { status: 'tagged' | 'failed', at, giftCardId, error } once usage tried to add the used-card tag
   };
 }
 
@@ -667,55 +659,17 @@ export function foldJournal(entries) {
         s.error = e.error ?? 'tag failed';
         break;
       }
-      case 'remind.start': {
+      case 'used.tag.ok':
+      case 'used.tag.fail': {
+        // usage added the used-card tag ("<SENT_TAG>-USED") to this customer, or failed to; the latest
+        // outcome wins (a failure is retried by the next usage run). The issue state is left alone.
         const s = get(e.cid);
-        s.reminders[String(e.round)] = { status: REMIND_STATUS.IN_PROGRESS, startedAt: e.t, at: null, giftCardId: e.giftCardId ?? null, error: null, reason: null, run: e.run ?? null };
-        break;
-      }
-      case 'remind.ok':
-      case 'remind.fail':
-      case 'remind.unknown': {
-        const s = get(e.cid);
-        const r = s.reminders[String(e.round)] ?? { startedAt: null, giftCardId: null };
-        r.status = e.op === 'remind.ok' ? REMIND_STATUS.SENT : e.op === 'remind.fail' ? REMIND_STATUS.FAILED : REMIND_STATUS.UNKNOWN;
-        r.at = e.t;
-        r.error = e.op === 'remind.ok' ? null : e.error ?? null;
-        s.reminders[String(e.round)] = r;
-        break;
-      }
-      case 'remind.rejected': {
-        // Shopify definitely did not send it (e.g. throttled out): the round may be tried again.
-        const s = get(e.cid);
-        delete s.reminders[String(e.round)];
-        break;
-      }
-      case 'remind.found': {
-        // The customer carries the round tag in Shopify, so this round was sent, though the journal
-        // had no remind.ok (lost or rolled back): sent from now on. When and with which card is unknown.
-        const s = get(e.cid);
-        if (s.reminders[String(e.round)]?.status !== REMIND_STATUS.SENT) {
-          s.reminders[String(e.round)] = { status: REMIND_STATUS.SENT, at: null, startedAt: null, giftCardId: null, error: null, reason: null, source: 'tag', run: e.run ?? null };
-        }
-        break;
-      }
-      case 'remind.tag.fail':
-      case 'remind.tag.ok': {
-        // Adding the round tag after a send failed (the status stays: the email went out), or a later
-        // run added it / found it. Only for a round state that exists; nothing is created.
-        const r = customers.get(e.cid)?.reminders?.[String(e.round)];
-        if (r) {
-          r.tagError = e.op === 'remind.tag.fail' ? e.error ?? 'tag failed' : null;
-          // A deleted customer can never be tagged: stop the repair for good.
-          if (e.op === 'remind.tag.ok' && e.note === 'customer deleted') r.tagSettled = true;
-        }
-        break;
-      }
-      case 'remind.skip': {
-        const s = get(e.cid);
-        const prev = s.reminders[String(e.round)];
-        if (!prev || prev.status === REMIND_STATUS.SKIPPED) {
-          s.reminders[String(e.round)] = { status: REMIND_STATUS.SKIPPED, startedAt: null, at: e.t, giftCardId: null, error: null, reason: e.reason ?? null, detail: e.detail ?? null };
-        }
+        s.usedTag = {
+          status: e.op === 'used.tag.ok' ? USED_TAG_STATUS.TAGGED : USED_TAG_STATUS.FAILED,
+          at: e.t,
+          giftCardId: e.giftCardId ?? null,
+          error: e.op === 'used.tag.ok' ? null : e.error ?? 'tag failed',
+        };
         break;
       }
       case 'skip': {

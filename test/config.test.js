@@ -70,20 +70,26 @@ test('config: gift tiers and percent', () => {
   assert.throws(() => cfg({ GIFT_PERCENT: 'ten' }), /GIFT_PERCENT/);
 });
 
-test('config: campaign dates are real YYYY-MM-DD dates in order', () => {
-  const c = cfg({ LAUNCH_DATE: '2026-10-05', REMIND_1_DATE: '2026-10-12', REMIND_2_DATE: '2026-10-16', GIFT_CARD_EXPIRES_ON: '2026-10-19' });
-  assert.deepEqual([c.launchDate, c.remind1Date, c.remind2Date, c.giftCardExpiresOn], ['2026-10-05', '2026-10-12', '2026-10-16', '2026-10-19']);
-  // The second reminder may fall on the last usable day.
-  assert.equal(cfg({ REMIND_2_DATE: '2026-10-19', GIFT_CARD_EXPIRES_ON: '2026-10-19' }).remind2Date, '2026-10-19');
+test('config: campaign dates are real YYYY-MM-DD dates, launch not after expiry', () => {
+  const c = cfg({ LAUNCH_DATE: '2026-10-05', GIFT_CARD_EXPIRES_ON: '2026-10-19' });
+  assert.deepEqual([c.launchDate, c.giftCardExpiresOn], ['2026-10-05', '2026-10-19']);
+  // Launch may fall on the last usable day.
+  assert.equal(cfg({ LAUNCH_DATE: '2026-10-19', GIFT_CARD_EXPIRES_ON: '2026-10-19' }).launchDate, '2026-10-19');
   assert.throws(() => cfg({ LAUNCH_DATE: '2026/10/05' }), /LAUNCH_DATE must be a real date in the format YYYY-MM-DD/);
   assert.throws(() => cfg({ LAUNCH_DATE: '10-05-2026' }), /LAUNCH_DATE/);
-  assert.throws(() => cfg({ REMIND_1_DATE: '2026-02-30' }), /REMIND_1_DATE/);
+  assert.throws(() => cfg({ LAUNCH_DATE: '2026-02-30' }), /LAUNCH_DATE/);
   assert.throws(() => cfg({ GIFT_CARD_EXPIRES_ON: '2026-13-01' }), /GIFT_CARD_EXPIRES_ON/);
-  assert.throws(() => cfg({ LAUNCH_DATE: '2026-10-12', REMIND_1_DATE: '2026-10-12' }), /LAUNCH_DATE \(2026-10-12\) must be earlier than REMIND_1_DATE/);
-  assert.throws(() => cfg({ REMIND_1_DATE: '2026-10-16', REMIND_2_DATE: '2026-10-12' }), /REMIND_1_DATE .* must be earlier than REMIND_2_DATE/);
-  assert.throws(() => cfg({ LAUNCH_DATE: '2026-10-05', REMIND_2_DATE: '2026-10-20', GIFT_CARD_EXPIRES_ON: '2026-10-19' }), /must not be later than GIFT_CARD_EXPIRES_ON/);
-  // Gaps are allowed (e.g. only the expiry is set).
-  assert.equal(cfg({ GIFT_CARD_EXPIRES_ON: '2026-10-19' }).remind1Date, '');
+  assert.throws(() => cfg({ LAUNCH_DATE: '2026-10-20', GIFT_CARD_EXPIRES_ON: '2026-10-19' }), /LAUNCH_DATE \(2026-10-20\) must not be later than GIFT_CARD_EXPIRES_ON \(2026-10-19\)/);
+  // Either date alone is fine.
+  assert.equal(cfg({ GIFT_CARD_EXPIRES_ON: '2026-10-19' }).launchDate, '');
+  assert.equal(cfg({ LAUNCH_DATE: '2026-10-05' }).giftCardExpiresOn, '');
+});
+
+test('config: the reminder dates are gone (reminders are sent with Shopify Email); old .env keys are ignored', () => {
+  const c = cfg({ LAUNCH_DATE: '2026-10-05', REMIND_1_DATE: '2026-10-12', REMIND_2_DATE: 'not-a-date', GIFT_CARD_EXPIRES_ON: '2026-10-19' });
+  assert.equal('remind1Date' in c, false);
+  assert.equal('remind2Date' in c, false);
+  assert.equal(Object.keys(c).some((k) => /remind/i.test(k)), false);
 });
 
 test('config: test campaigns must say so in CAMPAIGN_ID', () => {
