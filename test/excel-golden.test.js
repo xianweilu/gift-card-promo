@@ -1,9 +1,11 @@
 // Golden comparison of the Chinese workbook: the scenarios of test/report-fixture.js (frozen
 // inputs in test/fixtures/report-scenarios.json) must produce exactly the cells recorded in
 // test/fixtures/excel-golden-zh.json: every sheet, row, value, formula, number format and style,
-// plus the warnings writeReport returns. The golden was recorded from the workbook code as it was
-// before the Chinese texts moved into src/report/text.js (2026-10-02), so it proves the Chinese
-// edition did not change.
+// plus the warnings writeReport returns. The golden was first recorded from the workbook code as it
+// was before the Chinese texts moved into src/report/text.js (2026-10-02); it was re-recorded on
+// 2026-10-05 when the reminders moved to Shopify Email (the reminder columns, the 提醒 section and
+// the round-tag texts left; the 用卡 tag column, line and help came). Since then it proves the
+// Chinese edition does not change by accident.
 //
 // Only when the Chinese output is meant to change (a reviewed wording change), record it again:
 //   UPDATE_EXCEL_GOLDEN=1 node --test test/excel-golden.test.js

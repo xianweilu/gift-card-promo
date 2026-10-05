@@ -3,16 +3,15 @@
 // The two templates in notifications/ are pasted into the Shopify admin by
 // hand and Shopify renders them when it sends the email. This module renders
 // the same templates locally with liquidjs so the copy can be checked before
-// pasting: the three promo stages (first email, reminder 1, reminder 2) and
-// the original email for gift cards that are not part of the campaign.
+// pasting: the promo email (cards issued by this tool) and the original email
+// for gift cards that are not part of the campaign. Reminders are sent with
+// Shopify Email, so there is one promo copy only. Every date in the body comes
+// from the card's expiry date (gift_card.expires_on); the subject hardcodes
+// its date, because Shopify caps a subject template at 512 characters and the
+// Liquid that computes "19th" does not fit. The preview warns when that
+// hardcoded date is not the cards' expiry date, or the template is too long.
 //
-// The templates cannot read .env, so the two reminder dates are also written
-// into a fixed block at the top of each template:
-//   {%- assign promo_remind_1 = 20261012 -%}{%- assign promo_remind_2 = 20261016 -%}
-// syncTemplateDates() rewrites exactly those numbers from REMIND_1_DATE /
-// REMIND_2_DATE and leaves every other byte of the templates alone.
-//
-// Nothing here contacts Shopify.
+// Nothing here contacts Shopify and nothing here writes to the templates.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -24,7 +23,7 @@ import { localDate, localDateTime } from './time.js';
 import { formatUsd } from './select/amount.js';
 
 /** The emails that can be previewed, in display order. */
-export const VARIANTS = Object.freeze(['first', 'remind1', 'remind2', 'original']);
+export const VARIANTS = Object.freeze(['first', 'original']);
 
 export const DEFAULT_TEMPLATES_DIR = path.join(ROOT_DIR, 'notifications');
 
@@ -43,91 +42,25 @@ const STORE_TIMEZONE = 'America/Los_Angeles';
 const SHOPIFY_ASSET_BASE = 'https://cdn.shopify.com/shopifycloud/shopify/assets/';
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-/** Chinese names of the variants / template stages (they share the same keys). */
-const LABELS = Object.freeze({ first: '首封', remind1: '第一次提醒', remind2: '第二次提醒', original: '原版' });
-
-// `assign promo_remind_1 = 20261012` → [prefix, round ('1' | '2'), value].
-// The value runs until whitespace or the closing `-%}` / `%}` of the tag, so a
-// malformed value (e.g. '2026-10-12' or a quoted string) is captured and reported.
-const REMIND_ASSIGNMENT = /(\bassign\s+promo_remind_([12])\s*=\s*)((?:(?!-?%\})\S)*)/g;
-
-// The body template prints which copy it chose, e.g. <!-- promo-stage: remind1 -->.
-const STAGE_MARKER = /<!--\s*promo-stage:\s*([\w-]+)\s*-->/;
-
-// ---------------------------------------------------------------------------
-// Template dates ⇄ .env
-// ---------------------------------------------------------------------------
-
 /**
- * Make the reminder dates written in both templates match REMIND_1_DATE /
- * REMIND_2_DATE. Every `assign promo_remind_1 = <YYYYMMDD>` and
- * `assign promo_remind_2 = <YYYYMMDD>` is set to the configured date; nothing
- * else in the files changes.
- *
- * Nothing is written when there is any problem (a date missing from .env, a
- * template missing, an assignment missing or not an 8-digit number).
- *
- * @param {object} a
- * @param {object} a.config loadConfig() result (remind1Date, remind2Date)
- * @param {string} [a.templatesDir] folder holding the two templates (default notifications/)
- * @param {boolean} [a.write] false = only report what differs
- * @param {object} [a.log]
- * @returns {{ changed: boolean, files: string[], problems: string[], changes: {file, name, from, to}[] }}
- *   changed/files: templates whose dates differ from .env (rewritten when `write`).
+ * Shopify refuses a notification subject template longer than this ("Email
+ * subject is too long (maximum is 512 characters)"). Liquid logic counts too,
+ * which is why the promo subject hardcodes its date instead of computing it.
  */
-export function syncTemplateDates({ config, templatesDir = DEFAULT_TEMPLATES_DIR, write = true, log = console } = {}) {
-  const problems = [];
+export const SUBJECT_MAX_LENGTH = 512;
 
-  const wanted = {}; // round → 'YYYYMMDD'
-  for (const [round, key, value] of [['1', 'REMIND_1_DATE', config.remind1Date], ['2', 'REMIND_2_DATE', config.remind2Date]]) {
-    if (value && DATE_RE.test(value)) wanted[round] = value.replaceAll('-', '');
-    else problems.push(`.env 里没有设置 ${key}（格式 YYYY-MM-DD），无法更新邮件模板里的提醒日期`);
-  }
+// The hardcoded date in the promo subject: "… by Oct. 19th!" (month name or
+// abbreviation, optional period, day, optional ordinal suffix).
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+const SUBJECT_DATE_RE = /\bby\s+((jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?)\b/i;
 
-  const templates = [];
-  for (const name of Object.values(TEMPLATE_FILES)) {
-    const file = path.join(templatesDir, name);
-    let text;
-    try {
-      text = fs.readFileSync(file, 'utf8');
-    } catch (err) {
-      problems.push(err.code === 'ENOENT' ? `找不到邮件模板：${file}` : `读不了邮件模板 ${file}：${err.message}`);
-      continue;
-    }
-    const found = { 1: 0, 2: 0 };
-    for (const m of text.matchAll(REMIND_ASSIGNMENT)) {
-      found[m[2]] += 1;
-      if (!/^\d{8}$/.test(m[3])) {
-        problems.push(`邮件模板 ${file} 里 promo_remind_${m[2]} 的值 "${m[3]}" 不是 8 位日期（应为 YYYYMMDD，例如 20261012）`);
-      }
-    }
-    for (const round of ['1', '2']) {
-      if (!found[round]) {
-        problems.push(`邮件模板 ${file} 里找不到 {%- assign promo_remind_${round} = YYYYMMDD -%}：请恢复模板开头的活动日期区块`);
-      }
-    }
-    templates.push({ file, text, next: text });
-  }
+/** Chinese names of the variants. */
+const LABELS = Object.freeze({ first: '首封', original: '原版' });
+/** Chinese names of the template's copies (its promo-stage marker). */
+const STAGE_LABELS = Object.freeze({ promo: '活动文案', original: '原版' });
 
-  if (problems.length) return { changed: false, files: [], problems, changes: [] };
-
-  const changes = [];
-  for (const t of templates) {
-    t.next = t.text.replace(REMIND_ASSIGNMENT, (all, prefix, round, value) => {
-      if (value !== wanted[round]) changes.push({ file: t.file, name: `promo_remind_${round}`, from: value, to: wanted[round] });
-      return `${prefix}${wanted[round]}`;
-    });
-  }
-  const outdated = templates.filter((t) => t.next !== t.text);
-  const changed = outdated.length > 0;
-
-  if (changed && write) {
-    for (const t of outdated) writeFileAtomic(t.file, t.next);
-    log.warn('模板已按 .env 更新，请把主题和正文重新贴到 Shopify 后台');
-    for (const c of changes) log.info(`  ${path.basename(c.file)}：${c.name} ${c.from} → ${c.to}`);
-  }
-  return { changed, files: outdated.map((t) => t.file), problems, changes };
-}
+// The body template prints which copy it chose: <!-- promo-stage: promo --> or original.
+const STAGE_MARKER = /<!--\s*promo-stage:\s*([\w-]+)\s*-->/;
 
 // ---------------------------------------------------------------------------
 // Rendering
@@ -139,36 +72,17 @@ function storeToday(config, now) {
 }
 
 /**
- * The day a variant is pretended to be sent: first / original on LAUNCH_DATE
- * (today when it is not set), the reminders on REMIND_1_DATE / REMIND_2_DATE.
+ * The day a preview is pretended to be sent: LAUNCH_DATE, or today when it is
+ * not set. The copy no longer depends on it; it only pins the template's 'now'.
  */
 export function simulatedSendDate(config, variant, now = () => new Date()) {
-  switch (variant) {
-    case 'first':
-    case 'original':
-      return config.launchDate || storeToday(config, now);
-    case 'remind1':
-      if (!config.remind1Date) throw new Error('.env 里没有设置 REMIND_1_DATE，无法预览第一次提醒');
-      return config.remind1Date;
-    case 'remind2':
-      if (!config.remind2Date) throw new Error('.env 里没有设置 REMIND_2_DATE，无法预览第二次提醒');
-      return config.remind2Date;
-    default:
-      throw new Error(unknownVariantMessage(variant));
-  }
+  if (!VARIANTS.includes(variant)) throw new Error(unknownVariantMessage(variant));
+  return config.launchDate || storeToday(config, now);
 }
 
-/**
- * The stage the template should show for `variant` sent on `date` when its
- * dates agree with .env. Without both reminder dates in .env the variant's
- * own stage is assumed.
- */
-export function expectedStage(config, variant, date) {
-  if (variant === 'original') return 'original';
-  if (!config.remind1Date || !config.remind2Date) return variant;
-  if (date >= config.remind2Date) return 'remind2';
-  if (date >= config.remind1Date) return 'remind1';
-  return 'first';
+/** The copy the template must show for `variant`: 'promo' for the campaign email, 'original' otherwise. */
+export function expectedStage(variant) {
+  return variant === 'original' ? 'original' : 'promo';
 }
 
 /** Shopify-style money from integer cents: 1077 → "$10.77"; trimZeros: 1000 → "$10". Blank for non-numbers. */
@@ -192,9 +106,9 @@ function formatMoney(cents, { trimZeros = false } = {}) {
  * this machine's zone, which in Los Angeles is October 18 — one day early.
  * Rendering every date in UTC (timezoneOffset 0) keeps calendar dates on their
  * day whatever zone the machine is in. 'now' / 'today' are pinned to 19:00 UTC
- * on sendDate, which is around noon in Los Angeles, so the template's
- * `'now' | date: '%Y%m%d'` gives sendDate both in UTC and in the store's zone.
- * locale en-US keeps month names English on a machine set to another language.
+ * on sendDate, which is around noon in Los Angeles, so a `'now' | date` gives
+ * sendDate both in UTC and in the store's zone. locale en-US keeps month names
+ * English on a machine set to another language.
  */
 export function createPreviewEngine({ sendDate, currency = 'USD' }) {
   if (!DATE_RE.test(String(sendDate ?? ''))) throw new Error(`模拟发送日期必须是 YYYY-MM-DD，收到 "${sendDate}"`);
@@ -271,9 +185,56 @@ export function previewData(config, variant, recipient = null, { expiresOn } = {
   };
 }
 
-/** The stage the body template chose (from its promo-stage marker), or null. */
+/** The copy the body template chose (from its promo-stage marker), or null. */
 export function parseStage(html) {
   return STAGE_MARKER.exec(String(html ?? ''))?.[1] ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Subject template checks
+// ---------------------------------------------------------------------------
+
+/** The length Shopify measures: characters (code points, so 💰 is one), without a trailing newline. */
+export function subjectLength(template) {
+  return [...String(template ?? '').trimEnd()].length;
+}
+
+/**
+ * The date written into the subject template by hand ("… by Oct. 19th!"), as
+ * { text: 'Oct. 19th', month: 10, day: 19 }, or null when there is none. Only
+ * literal text is searched; Liquid tags and outputs are ignored.
+ */
+export function subjectHardcodedDate(template) {
+  const literal = String(template ?? '').replace(/\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}/g, ' ');
+  const m = SUBJECT_DATE_RE.exec(literal);
+  if (!m) return null;
+  return { text: m[1], month: MONTHS.indexOf(m[2].toLowerCase()) + 1, day: Number(m[3]) };
+}
+
+/**
+ * Warnings about the subject template: longer than Shopify accepts, or a
+ * hardcoded date that is not the cards' expiry date (`expiresOn`: 'YYYY-MM-DD',
+ * or null for cards without one). The year is not in the subject, so only the
+ * month and day are compared. Returns [] when everything is fine.
+ */
+export function subjectTemplateWarnings(template, expiresOn) {
+  const warnings = [];
+  const length = subjectLength(template);
+  if (length > SUBJECT_MAX_LENGTH) {
+    warnings.push(`主题模板有 ${length} 个字符，超过 Shopify 的上限 ${SUBJECT_MAX_LENGTH} 个，后台会拒绝保存：请缩短 ${TEMPLATE_FILES.subject}`);
+  }
+  const hard = subjectHardcodedDate(template);
+  if (hard) {
+    if (!expiresOn) {
+      warnings.push(`主题模板里写死了到期日 "${hard.text}"，但这些卡没有到期日：请改 ${TEMPLATE_FILES.subject} 后重新贴到 Shopify 后台`);
+    } else {
+      const [, month, day] = String(expiresOn).split('-').map(Number);
+      if (hard.month !== month || hard.day !== day) {
+        warnings.push(`主题模板里写死的到期日 "${hard.text}" 和礼品卡到期日 ${expiresOn} 不一致：请改 ${TEMPLATE_FILES.subject} 后重新贴到 Shopify 后台`);
+      }
+    }
+  }
+  return warnings;
 }
 
 function readTemplate(templatesDir, name) {
@@ -291,7 +252,7 @@ function escapeHtml(value) {
 }
 
 function unknownVariantMessage(variant) {
-  return `未知的预览类型 "${variant}"。可选：first（首封）、remind1（第一次提醒）、remind2（第二次提醒）、original（原版），不写则四种全部生成`;
+  return `未知的预览类型 "${variant}"。可选：first（首封）、original（原版），不写则两种都生成`;
 }
 
 function describeRecipient(recipient, firstName) {
@@ -300,8 +261,9 @@ function describeRecipient(recipient, firstName) {
 }
 
 /** The small notice shown at the top of a preview page (not part of the real email). */
-function bannerHtml({ subject, sendDate, variant, recipient, data }) {
+function bannerHtml({ subject, variant, recipient, data }) {
   const firstName = data.gift_card.customer.first_name;
+  const expiry = data.gift_card.expires_on;
   const style = [
     'font-family: -apple-system, BlinkMacSystemFont, \'PingFang SC\', \'Helvetica Neue\', Arial, sans-serif',
     'font-size: 13px',
@@ -313,7 +275,7 @@ function bannerHtml({ subject, sendDate, variant, recipient, data }) {
     'padding: 8px 12px',
   ].join('; ');
   return `<div class="gift-card-promo-preview" style="${style}">`
-    + `<strong>本地预览</strong>　主题：${escapeHtml(subject)}，模拟发送日期：${escapeHtml(sendDate)}，变体：${escapeHtml(variant)}（${LABELS[variant]}）<br>`
+    + `<strong>本地预览</strong>　主题：${escapeHtml(subject)}，变体：${escapeHtml(variant)}（${LABELS[variant]}），礼品卡到期日：${escapeHtml(expiry || '（未设置）')}<br>`
     + `${escapeHtml(describeRecipient(recipient, firstName))}，礼品卡金额 ${formatUsd(data.gift_card.balance)}。`
     + 'Shopify 后台的邮件样式表不在本地，排版以测试活动收到的真实邮件为准。'
     + '</div>';
@@ -333,17 +295,17 @@ function withBanner(html, banner) {
  * @param {object} a
  * @param {object} a.config
  * @param {object} [a.paths] campaignPaths(config)
- * @param {'first'|'remind1'|'remind2'|'original'} a.variant
+ * @param {'first'|'original'} a.variant
  * @param {object|null} [a.recipient] a selection.json recipient (first name + amount), or sample data
  * @param {string} [a.templatesDir]
  * @param {object} [a.log]
  * @param {() => Date} [a.now] only used for "today" when LAUNCH_DATE is not set
- * @param {string|null} [a.sendDate] YYYY-MM-DD to render as if sent that day (default: the variant's day)
+ * @param {string|null} [a.sendDate] YYYY-MM-DD the template's 'now' is pinned to (default: LAUNCH_DATE or today);
+ *   the copy does not depend on it
  * @param {string|null} [a.expiresOn] the cards' expiry date to show, overriding GIFT_CARD_EXPIRES_ON
  *   (callers with a selection pass selection.params.giftCardExpiresOn; '' / null = no expiry date)
- * @param {boolean} [a.checkDates] also warn when the templates' reminder dates differ from .env
  * @returns {Promise<{ file: string, subject: string, stage: string|null, expectedStage: string, sendDate: string, variant: string, expiresOn: string|null }>}
- *   stage: what the template actually showed; expectedStage: what .env's dates call for on sendDate;
+ *   stage: what the template actually showed ('promo' | 'original'); expectedStage: what the variant calls for;
  *   expiresOn: the expiry date the email showed (null = none).
  */
 export async function renderPreviewFor({
@@ -356,21 +318,11 @@ export async function renderPreviewFor({
   now = () => new Date(),
   sendDate = null,
   expiresOn = undefined,
-  checkDates = true,
 } = {}) {
   if (!VARIANTS.includes(variant)) throw new Error(unknownVariantMessage(variant));
   const date = sendDate ?? simulatedSendDate(config, variant, now);
   if (!DATE_RE.test(String(date))) throw new Error(`模拟发送日期必须是 YYYY-MM-DD，收到 "${date}"`);
   const expiry = previewExpiresOn(config, expiresOn); // validated before anything is read or written
-
-  if (checkDates) {
-    // Read-only: only `preview` itself rewrites the templates.
-    const check = syncTemplateDates({ config, templatesDir, write: false, log });
-    for (const problem of check.problems) log.warn(`邮件模板的提醒日期有问题：${problem}`);
-    if (check.changed) {
-      log.warn('模板里的提醒日期和 .env 不一致：请先运行 node index.js preview 更新模板，再把主题和正文重新贴到 Shopify 后台');
-    }
-  }
 
   const subjectTemplate = readTemplate(templatesDir, TEMPLATE_FILES.subject);
   const bodyTemplate = readTemplate(templatesDir, TEMPLATE_FILES.body);
@@ -382,23 +334,27 @@ export async function renderPreviewFor({
   const body = await engine.parseAndRender(bodyTemplate, data);
 
   const stage = parseStage(body);
-  const expected = expectedStage(config, variant, date);
+  const expected = expectedStage(variant);
   if (stage !== expected) {
-    const shown = stage ? `${LABELS[stage] ?? stage}（${stage}）` : '没有 promo-stage 标记';
+    const shown = stage ? `${STAGE_LABELS[stage] ?? stage}（${stage}）` : '没有 promo-stage 标记';
     const suffixHint = stage === 'original' && variant !== 'original'
-      ? '；也可能是 .env 的 GIFT_CARD_TEMPLATE_SUFFIX 和模板里的 promo 后缀不一致'
+      ? '；可能是 .env 的 GIFT_CARD_TEMPLATE_SUFFIX 和模板里的 promo 后缀不一致'
       : '';
-    log.warn(`预览的文案和预期不一致：模板里的日期可能和 .env 不一致（${LABELS[variant]}，模拟 ${date} 发送，预期${LABELS[expected]}（${expected}），模板显示${shown}${suffixHint}）`);
-  } else if (expected !== variant) {
-    log.info(`按 .env 的日期，${date} 发出的是${LABELS[expected]}文案（${expected}）`);
+    log.warn(`预览的文案和预期不一致：${LABELS[variant]}预期${STAGE_LABELS[expected]}（${expected}），模板显示${shown}${suffixHint}`);
   }
 
   if (recipient && !data.gift_card.customer.first_name) {
-    log.warn(`名单第 ${recipient.seq} 号顾客没有名字，邮件里会显示 "Hi ,"`);
+    log.warn(`名单第 ${recipient.seq} 号顾客没有名字，邮件里只会显示 "Hello,"`);
+  }
+
+  // The subject's length limit and hardcoded date concern the promo email; checked
+  // once per run (the original variant shares the file, so it would repeat them).
+  if (variant !== 'original') {
+    for (const warning of subjectTemplateWarnings(subjectTemplate, data.gift_card.expires_on)) log.warn(warning);
   }
 
   const file = path.join(paths.previewDir, `${variant}.html`);
-  writeFileAtomic(file, withBanner(body, bannerHtml({ subject, sendDate: date, variant, recipient, data })));
+  writeFileAtomic(file, withBanner(body, bannerHtml({ subject, variant, recipient, data })));
   return { file, subject, stage, expectedStage: expected, sendDate: date, variant, expiresOn: data.gift_card.expires_on };
 }
 
@@ -410,7 +366,7 @@ export async function renderPreviewFor({
  * The overview page. `expiresOn` is the expiry date the previews showed (null = none);
  * `fromList` says it is the one frozen in the list rather than GIFT_CARD_EXPIRES_ON.
  */
-function indexHtml({ config, results, recipient, sync, generatedAt, timezone, expiresOn, fromList }) {
+function indexHtml({ config, results, recipient, generatedAt, timezone, expiresOn, fromList }) {
   const sample = previewData(config, 'first', recipient, { expiresOn }); // the name and amount every page used
   const who = describeRecipient(recipient, sample.gift_card.customer.first_name);
   const envExpiry = config.giftCardExpiresOn || null;
@@ -419,16 +375,13 @@ function indexHtml({ config, results, recipient, sync, generatedAt, timezone, ex
     : '';
   const rows = results.map((r) => {
     const mismatch = r.stage !== r.expectedStage
-      ? `<br><span class="warn">⚠ 模板显示的是${escapeHtml(LABELS[r.stage] ?? r.stage ?? '（没有 promo-stage 标记）')}，按 .env 应为${escapeHtml(LABELS[r.expectedStage])}</span>`
+      ? `<br><span class="warn">⚠ 模板显示的是${escapeHtml(STAGE_LABELS[r.stage] ?? r.stage ?? '（没有 promo-stage 标记）')}，应为${escapeHtml(STAGE_LABELS[r.expectedStage])}</span>`
       : '';
     const note = r.variant === 'original' ? '<br><span class="note">不是本活动的礼品卡收到的邮件</span>' : '';
     const name = path.basename(r.file);
-    return `      <tr><td>${LABELS[r.variant]}（${r.variant}）${note}${mismatch}</td><td>${escapeHtml(r.sendDate)}</td>`
+    return `      <tr><td>${LABELS[r.variant]}（${r.variant}）${note}${mismatch}</td>`
       + `<td>${escapeHtml(r.subject)}</td><td><a href="${escapeHtml(encodeURIComponent(name))}">${escapeHtml(name)}</a></td></tr>`;
   }).join('\n');
-  const updated = sync.changed
-    ? '\n  <p class="warn">模板已按 .env 更新，请把主题和正文重新贴到 Shopify 后台。</p>'
-    : '';
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -449,16 +402,16 @@ function indexHtml({ config, results, recipient, sync, generatedAt, timezone, ex
 <body>
   <h1>邮件预览（活动 ${escapeHtml(config.campaignId)}）</h1>
   <p>生成于 ${escapeHtml(generatedAt)}（${escapeHtml(timezone)}）。${escapeHtml(who)}，礼品卡金额 ${formatUsd(sample.gift_card.balance)}。</p>
-  <p>模板里的提醒日期：第一次提醒 ${escapeHtml(config.remind1Date)}，第二次提醒 ${escapeHtml(config.remind2Date)}，与 .env 一致。礼品卡到期日：${escapeHtml(expiresOn || '（未设置）')}${escapeHtml(expiryNote)}。</p>${updated}
+  <p>礼品卡到期日：${escapeHtml(expiresOn || '（未设置）')}${escapeHtml(expiryNote)}。邮件里的日期都由卡的到期日生成；提醒邮件用 Shopify Email 发送，不在这里预览。</p>
   <table>
     <thead>
-      <tr><th>变体</th><th>模拟发送日期</th><th>主题</th><th>文件链接</th></tr>
+      <tr><th>变体</th><th>主题</th><th>文件链接</th></tr>
     </thead>
     <tbody>
 ${rows}
     </tbody>
   </table>
-  <p class="note">Shopify 后台的邮件样式表不在本地，排版和真实邮件会有小差别。预览用来核对文案和三种切换；真实样子以测试活动收到的邮件为准。</p>
+  <p class="note">Shopify 后台的邮件样式表不在本地，排版和真实邮件会有小差别。预览用来核对文案；真实样子以测试活动收到的邮件为准。</p>
 </body>
 </html>
 `;
@@ -492,15 +445,15 @@ function parseSeq(seq) {
 }
 
 /**
- * `node index.js preview [first|remind1|remind2|original] [--seq N] [--open]`
+ * `node index.js preview [first|original] [--seq N] [--open]`
  *
- * Updates the templates' reminder dates from .env, renders the requested
- * emails to campaigns/<id>/preview/<variant>.html plus an overview page
- * index.html, and prints every subject and file path. Never contacts Shopify.
- * Sample data uses GIFT_CARD_EXPIRES_ON; with --seq the expiry frozen in the
- * list (selection.params.giftCardExpiresOn) is shown, as on the real cards.
+ * Renders the requested emails to campaigns/<id>/preview/<variant>.html plus
+ * an overview page index.html, and prints every subject and file path. Never
+ * contacts Shopify and never changes the templates. Sample data uses
+ * GIFT_CARD_EXPIRES_ON; with --seq the expiry frozen in the list
+ * (selection.params.giftCardExpiresOn) is shown, as on the real cards.
  *
- * @returns {Promise<{ exitCode: number, files: string[], templatesChanged: boolean, index: string|null, results: object[] }>}
+ * @returns {Promise<{ exitCode: number, files: string[], index: string|null, results: object[] }>}
  *   files: the rendered email pages; index: the overview page.
  */
 export async function runPreview({
@@ -513,7 +466,7 @@ export async function runPreview({
   now = () => new Date(),
   openFile = openInBrowser,
 } = {}) {
-  const stop = (exitCode, templatesChanged = false) => ({ exitCode, files: [], templatesChanged, index: null, results: [] });
+  const stop = (exitCode) => ({ exitCode, files: [], index: null, results: [] });
 
   const requested = String(variant ?? 'all').trim().toLowerCase() || 'all';
   if (requested !== 'all' && !VARIANTS.includes(requested)) {
@@ -528,16 +481,6 @@ export async function runPreview({
 
   const paths = campaignPaths(config);
 
-  const sync = syncTemplateDates({ config, templatesDir, write: true, log });
-  if (sync.problems.length) {
-    for (const p of sync.problems) log.error(p);
-    log.error('邮件模板里的提醒日期没有更新，预览没有生成');
-    return stop(1);
-  }
-  if (!sync.changed) {
-    log.info(`模板里的提醒日期和 .env 一致（REMIND_1_DATE=${config.remind1Date}，REMIND_2_DATE=${config.remind2Date}）`);
-  }
-
   let recipient = null;
   let expiresOn; // undefined = GIFT_CARD_EXPIRES_ON from .env (sample data)
   if (seqNo !== null) {
@@ -546,17 +489,17 @@ export async function runPreview({
       selection = readJson(paths.selection, null);
     } catch (err) {
       log.error(err.message);
-      return stop(1, sync.changed);
+      return stop(1);
     }
     if (!selection) {
       log.error(`还没有名单（${paths.selection}）：--seq 需要先运行 select`);
-      return stop(1, sync.changed);
+      return stop(1);
     }
     const recipients = selection.recipients ?? [];
     recipient = recipients.find((r) => r.seq === seqNo) ?? null;
     if (!recipient) {
       log.error(`名单里没有序号 ${seqNo}（名单共 ${recipients.length} 人${recipients.length ? `，序号 1–${recipients.length}` : ''}）`);
-      return stop(1, sync.changed);
+      return stop(1);
     }
     log.info(`用名单第 ${seqNo} 号顾客的名字和金额：${recipient.firstName || '（没有名字）'}，${formatUsd(recipient.amountCents)}`);
     // issue creates the cards with the expiry frozen in the list (selection.params), not with
@@ -573,22 +516,21 @@ export async function runPreview({
   try {
     for (const name of variants) {
       // Heading first, so a warning about this email is printed under it.
-      const sendDate = simulatedSendDate(config, name, now);
-      log.info(`${LABELS[name]}（${name}），模拟 ${sendDate} 发送`);
-      const r = await renderPreviewFor({ config, paths, variant: name, recipient, templatesDir, log, now, sendDate, expiresOn, checkDates: false });
+      log.info(`${LABELS[name]}（${name}）`);
+      const r = await renderPreviewFor({ config, paths, variant: name, recipient, templatesDir, log, now, expiresOn });
       results.push(r);
       log.info(`  主题：${r.subject}`);
       log.info(`  文件：${r.file}`);
     }
   } catch (err) {
     log.error(`预览生成失败：${err.message}`);
-    return { ...stop(1, sync.changed), files: results.map((r) => r.file), results };
+    return { ...stop(1), files: results.map((r) => r.file), results };
   }
 
   const timezone = config.timezone || STORE_TIMEZONE;
   const index = path.join(paths.previewDir, 'index.html');
   writeFileAtomic(index, indexHtml({
-    config, results, recipient, sync, generatedAt: localDateTime(now().getTime(), timezone), timezone,
+    config, results, recipient, generatedAt: localDateTime(now().getTime(), timezone), timezone,
     expiresOn: results[0]?.expiresOn ?? null, fromList: expiresOn !== undefined,
   }));
   log.info(`总览：${index}`);
@@ -604,5 +546,5 @@ export async function runPreview({
     }
   }
 
-  return { exitCode: 0, files: results.map((r) => r.file), templatesChanged: sync.changed, index, results };
+  return { exitCode: 0, files: results.map((r) => r.file), index, results };
 }

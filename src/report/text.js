@@ -58,18 +58,18 @@ const STATUS_LABELS = freeze({
   skipped: '发放前跳过',
 });
 
-// From REMIND_1_DATE on, issue only records leftovers and fixes tags for the real
-// campaign (fix spec D2): the statuses that wait for a new card say so.
-const NO_NEW_CARDS_FROM_REMIND_1 = '正式活动从 REMIND_1_DATE 起 issue 不再建新卡。';
+// From the cards' expiry date on, issue only records leftovers and fixes tags
+// (src/issue.js tooLateText): the statuses that wait for a new card say so.
+const NO_NEW_CARDS_AFTER_EXPIRY = '礼品卡到期日当天及以后 issue 不再建新卡。';
 
 /** What each status means (sheet "说明"). */
 const STATUS_HELP = freeze({
-  pending: `还没有处理；或核对确认上次没有建成卡，下次运行 issue 会重新处理。${NO_NEW_CARDS_FROM_REMIND_1}`,
+  pending: `还没有处理；或核对确认上次没有建成卡，下次运行 issue 会重新处理。${NO_NEW_CARDS_AFTER_EXPIRY}`,
   in_progress: 'issue 正在处理这个人。只在 issue 运行时显示；issue 不在运行时，停在这一步的人显示为“需人工核对”。',
   unknown: 'Shopify 的回复丢失，还不知道卡是否建好。下次运行 issue 或 verify 会先去 Shopify 查找这张卡，找到就补记，超过 10 分钟仍找不到才确认没建成。',
   created: '卡已建好（Shopify 已自动发出首封邮件），tag 还没打上。下次运行 issue 会只补打 tag，不会再建卡。',
   done: '已建卡并打上 tag。',
-  failed: `Shopify 明确拒绝建卡，原因见“备注/错误”。只有 issue --retry-failed 才会重试。${NO_NEW_CARDS_FROM_REMIND_1}`,
+  failed: `Shopify 明确拒绝建卡，原因见“备注/错误”。只有 issue --retry-failed 才会重试。${NO_NEW_CARDS_AFTER_EXPIRY}`,
   skipped: '发放前复查发现此人已不符合条件，不发卡，原因见“备注/错误”。',
 });
 
@@ -87,35 +87,6 @@ const ISSUE_SKIP_LABELS = freeze({
   'ordered-since-snapshot': '导出后下过单',
   'address-ordered-since-snapshot': '同地址账户导出后下过单',
 });
-
-/** Reminder skip reasons written by remind (journal op "remind.skip"). */
-const REMIND_SKIP_LABELS = freeze({
-  'no-card': '没有卡',
-  'multiple-cards': '有多张卡',
-  'card-disabled': '卡已停用',
-  'card-expired': '卡已过期',
-  used: '已用过卡',
-  'customer-deleted': '客户已删除',
-  'no-email': '没有邮箱',
-  'not-subscribed': NOT_SUBSCRIBED_LABEL,
-});
-
-/** "第 N 次提醒" cell of a reminder found sent by its round tag (journal op remind.found, source 'tag'). */
-const REMIND_SENT_BY_TAG = '已发（按 Shopify 上的本轮 tag 补记）';
-/** Added to a sent reminder's cell when tagging the customer with the round tag failed (remind.tag.fail). */
-const REMIND_TAG_MISSING_SUFFIX = '；本轮 tag 没打上，下次运行会补打';
-
-/** Reminder cell texts explained on the "说明" sheet. */
-const REMIND_HELP = freeze([
-  freeze(['（空白）', '这一轮还没有处理这个人。']),
-  freeze(['已发 MM-DD HH:MM', '已让 Shopify 重发礼品卡邮件，时间是店铺时间；发出后给客户打上本轮 tag（见“本轮 tag”）。每一轮每人最多一封。']),
-  freeze([REMIND_SENT_BY_TAG, '本地日志里这一轮没有“已发”的记录（例如日志丢失，或被更早的备份覆盖），但客户在 Shopify 上带着本轮 tag，所以算作这一轮已发，不会再发。发送时间不详。']),
-  freeze([`已发 MM-DD HH:MM${REMIND_TAG_MISSING_SUFFIX}`, '提醒已经发出，但给客户打本轮 tag 失败了：本地日志记着已发，这一轮不会再给他发。下次真实运行同一轮时会先补打这个 tag（见“补打本轮 tag”），补打成功后这里只显示“已发 MM-DD HH:MM”。']),
-  freeze(['跳过：原因', `这一轮不符合提醒条件，例如已用过卡、${NOT_SUBSCRIBED_LABEL}、卡已停用或过期。再次运行同一轮会重新判断。`]),
-  freeze(['失败：原因', 'Shopify 拒绝发送，原因写在后面。不会自动重发；原因解决后可用 remind --retry-failed 重发。']),
-  freeze(['结果不明', 'Shopify 的回复丢失，不知道邮件是否发出。不会自动重发（重发一定会多一封邮件）；确认后可用 remind --retry-unknown 补发。']),
-  freeze(['进行中', 'remind 正在处理这个人。只在 remind 运行时显示；remind 不在运行时显示为“结果不明”。']),
-]);
 
 /** Customer kind of a recipient. */
 const KIND_LABELS = freeze({ ordered: '有下单', never: '从没下单', test: '测试' });
@@ -153,15 +124,9 @@ const OP_LABELS = freeze({
   'tag.ok': '打 tag 成功',
   'tag.fail': '打 tag 失败',
   skip: '发放前跳过',
-  'remind.start': '开始提醒',
-  'remind.ok': '提醒已发',
-  'remind.fail': '提醒失败',
-  'remind.rejected': '提醒未发出（可重试）',
-  'remind.unknown': '提醒结果不明',
-  'remind.skip': '提醒跳过',
-  'remind.found': '按本轮 tag 补记已发',
-  'remind.tag.fail': '打本轮 tag 失败',
-  'remind.tag.ok': '本轮 tag 已打上', // written by the repair only: tag added again, or found in Shopify after all
+  // usage: the used-card tag "<SENT_TAG>-USED" (old remind.* ops of earlier journals show their raw op name)
+  'used.tag.ok': '打用卡 tag',
+  'used.tag.fail': '打用卡 tag 失败',
 });
 
 /** Where a reconcile.found entry came from. */
@@ -193,14 +158,6 @@ const SNAPSHOT_SOURCE_LABELS = freeze({
   nodes: '按客户 ID 读取',
 });
 
-/** run.end summary `stopped` values written by remind. */
-const STOP_LABELS = freeze({
-  rejected: '已停止：Shopify 没有接受发送请求',
-  'too-many-failures': '已停止：连续多次没有发送成功',
-  aborted: '已中断（Ctrl+C）',
-  error: '已停止：出错',
-});
-
 /** Fixed English notes some journal entries carry (anything else is shown as-is). */
 const NOTE_LABELS = freeze({
   'already tagged in Shopify': 'Shopify 上已带这个 tag',
@@ -219,7 +176,7 @@ const UNMATCHED_REASON_LABELS = freeze({
 const EXIT_CODE_HELP = freeze([
   freeze([0, '成功']),
   freeze([1, '中途停止或失败（原因见命令输出）']),
-  freeze([2, '用法错误：参数不对、缺少 --limit、还没到活动日期等，或已过 REMIND_1_DATE（issue 只补记和补打 tag，不建新卡）、已过 REMIND_2_DATE（不能再发第 1 次提醒）']),
+  freeze([2, '用法错误：参数不对、缺少 --limit、还没到活动日期等，或礼品卡到期日已到（issue 只补记和补打 tag，不建新卡）']),
   freeze([130, '按 Ctrl+C 中断（做完当前这个人后退出）']),
 ]);
 
@@ -233,8 +190,9 @@ const USAGE_SPLIT_NOTE = '礼品卡抵扣按结账时计算，之后退回卡里
 const GID_TYPE_LABELS = freeze({ Customer: '客户', Order: '订单', GiftCard: '礼品卡' });
 
 // Keys the commands put in run.end summaries (src/select/index.js, issue.js,
-// remind.js, usage.js, verify.js), plus a few generic ones. An unknown key is
-// shown verbatim, so a new counter still appears in the run history.
+// usage.js, verify.js), plus a few generic ones. An unknown key is shown
+// verbatim, so a new counter still appears in the run history (the counters of
+// the removed remind command, in journals written before, read as their key).
 const SUMMARY_KEY_LABELS = freeze({
   // select
   recipients: '入选',
@@ -255,24 +213,9 @@ const SUMMARY_KEY_LABELS = freeze({
   tagFailed: '打 tag 失败',
   reconciledNone: '确认未建成',
   stillUnknown: '仍需人工核对',
-  newCardsRefused: '没有建新卡（待建卡）', // people still waiting: on/after REMIND_1_DATE issue makes no new card (live and dry run)
+  newCardsRefused: '到期日已到，没有建新卡（待建卡）', // people still waiting: from the expiry date on issue makes no new card (live and dry run)
   repairOnly: '只补记和补打 tag', // issue --repair-only (true: the label alone)
-  stoppedByDate: '按日期停止', // issue / remind round 1 stopped mid-run at this store date ('YYYY-MM-DD')
-  // remind
-  eligible: '符合条件',
-  planned: '计划',
-  sent: '已发',
-  retriedUnknown: '补发（之前结果不明）',
-  retriedFailed: '重发（之前失败）',
-  alreadySent: '之前已发',
-  previouslyFailed: '之前失败',
-  waitingUnknown: '结果不明待核对',
-  notIssued: '未建卡',
-  alreadySentByTag: '按 tag 认定已发', // carries the round tag in Shopify, the journal had no send: counted as sent
-  roundTagged: '打本轮 tag',
-  roundTagFailed: '打本轮 tag 失败',
-  roundTagFixed: '补打本轮 tag', // sent earlier but missing the round tag: tagged again at the start of a live run
-  roundTagMissing: '缺本轮 tag', // dry run: how many a live run would tag again
+  stoppedByDate: '中途停止（到期日已到）', // issue stopped mid-run when the store date reached the expiry ('YYYY-MM-DD')
   // usage
   issuedCards: '发出的卡',
   usedCards: '已用的卡',
@@ -282,6 +225,9 @@ const SUMMARY_KEY_LABELS = freeze({
   giftCardCents: '礼品卡抵扣',
   customerPaidCents: '顾客另外支付',
   unmatched: '需人工核对的付款',
+  usedTagged: '已带用卡 tag', // customers who already carried "<SENT_TAG>-USED" before this run
+  usedTagAdded: '新打用卡 tag',
+  usedTagFailed: '打用卡 tag 失败',
   // verify
   cardCount: '卡',
   taggedCount: '带 tag 的客户',
@@ -298,7 +244,6 @@ const SUMMARY_KEY_LABELS = freeze({
   pending: '待发放',
   resolved: '已查明',
   retried: '重试',
-  reminded: '已提醒',
   cards: '卡',
   used: '已用',
   payments: '付款',
@@ -325,10 +270,6 @@ const zh = {
   STATUS_LABELS,
   STATUS_HELP,
   ISSUE_SKIP_LABELS,
-  REMIND_SKIP_LABELS,
-  REMIND_SENT_BY_TAG,
-  REMIND_TAG_MISSING_SUFFIX,
-  REMIND_HELP,
   KIND_LABELS,
   MARKETING_LABELS,
   BASIS_NOTES,
@@ -337,7 +278,6 @@ const zh = {
   RECONCILE_SOURCE_LABELS,
   VERIFY_TYPE_LABELS,
   SNAPSHOT_SOURCE_LABELS,
-  STOP_LABELS,
   NOTE_LABELS,
   UNMATCHED_REASON_LABELS,
   EXIT_CODE_HELP,
@@ -346,13 +286,14 @@ const zh = {
   SUMMARY_KEY_LABELS,
 
   /**
-   * The per-round tags explained on the "说明" sheet ([item, text] pairs); tag1 / tag2 are the
-   * campaign's round tags (labels.js roundTagName), the texts quote OP_LABELS and REMIND_SENT_BY_TAG.
+   * How the reminders work now, on the "说明" sheet ([item, text] pairs): Shopify Email with a
+   * segment built on the sent tag and the used-card tag. `sentTag` is the campaign's SENT_TAG,
+   * `usedTag` "<SENT_TAG>-USED" (labels.js usedTagName), `condition` the segment condition.
    */
-  roundTagHelp: (tag1, tag2) => [
-    ['本轮 tag', `第 1 次提醒是 ${tag1}，第 2 次提醒是 ${tag2}，两轮互不影响。每发出一封提醒，就给客户打上这一轮的 tag。`],
-    ['带本轮 tag 的人', `每次运行 remind（预演也一样）都先查 Shopify 上带本轮 tag 的客户：他们一律算这一轮已发过，不会再发，加 --retry-unknown 或 --retry-failed 也不会。所以即使本地日志丢失或被旧备份覆盖，这一轮也不会给同一个人再发一封；真实运行会把他们在本地日志里补记为“${REMIND_SENT_BY_TAG}”。`],
-    ['补打本轮 tag', `打本轮 tag 失败不影响已经发出的提醒（本地日志记着已发），“操作日志”里记一行“${OP_LABELS['remind.tag.fail']}”。下次真实运行同一轮时会先补打；发出满 10 分钟、Shopify 上却查不到本轮 tag 的人（例如 tag 在后台被删掉）也会补打。补打成功，或发现 Shopify 上其实已带这个 tag，记一行“${OP_LABELS['remind.tag.ok']}”。发提醒后直接打上 tag 的不单独记一行，只在运行记录里计数。`],
+  reminderHelp: (sentTag, usedTag, condition) => [
+    ['怎么发', `提醒邮件不再由程序发送，改用 Shopify Email。发提醒前先运行一次 usage，让用过卡的客户带上 ${usedTag}；然后在 Shopify Email 里用下面的收件人条件发送。`],
+    ['收件人条件', condition],
+    ['用卡 tag', `${usedTag}：每次运行 usage（不受 DRY_RUN 影响）都先查 Shopify 上已带这个 tag 的客户，再给余额小于面额、还没带 tag 的卡主打上，“操作日志”里记一行“${OP_LABELS['used.tag.ok']}”。打失败只警告，记一行“${OP_LABELS['used.tag.fail']}”，下次运行 usage 会再试。程序从不删 tag。`],
   ],
 
   // ---- shared words, separators and formats
@@ -366,8 +307,6 @@ const zh = {
   no: '否',
   notSet: '未设置',
   timeZone: freeze({ default: '洛杉矶时间', other: (tz) => `${tz} 时间` }),
-  /** "第 N 次提醒": the reminder rounds (汇总, 发放名单 titles, 操作日志 批次/轮次). */
-  roundName: (round) => `第 ${round} 次提醒`,
   /** Excel number formats with words (custom formats keep the cells numeric). */
   fmt: freeze({
     cards: '#,##0" 张"',
@@ -402,6 +341,8 @@ const zh = {
     byKind: freeze(['按客户类型', '发出', '已使用', '使用率', '已用金额']),
     daily: freeze(['每日', '当天新用的卡', '当天订单', '当天订单金额', '累计使用的卡', '累计使用率']),
     topProducts: freeze(['卖得最多的 10 个商品', '数量', '金额']),
+    /** The used-card tag line: people carrying "<SENT_TAG>-USED" after the latest usage run, how many it added and failed. */
+    usedTag: (n, added, failed) => `已打用卡 tag ${n} 人（本次新打 ${added}，失败 ${failed}）`,
     footer: (asOf, tz) => `截至 ${asOf}（${tz}）。每天运行一次 usage 更新本表；卡的余额小于原金额就算已使用。`,
   }),
 
@@ -437,8 +378,6 @@ const zh = {
     expiryNote: '到期日当天仍可使用',
     expiryChanged: (env, frozen) => `到期日当天仍可使用。注意：.env 的 GIFT_CARD_EXPIRES_ON 现在是 ${env}，但建卡仍用生成名单时的 ${frozen}`,
     launchDate: '首封邮件日期（正式建卡）',
-    remind1Date: '第一次提醒',
-    remind2Date: '第二次提醒',
     /** A date of .env that differs from the one frozen in the list ('' = 未设置, filled in by the caller). */
     dateChanged: (then, now) => `生成名单时为 ${then}，现在按 .env 为 ${now}`,
     sentTag: '发放 tag（SENT_TAG）',
@@ -497,14 +436,6 @@ const zh = {
     skipReasonsHeader: freeze(['发放前跳过的原因', '人数']),
     reasonMissing: '原因未记录',
     progressNote: '金额：已建卡的按卡的金额，其余按名单金额。“进行中”只在 issue 运行时出现；issue 不在运行时，这些人算作“需人工核对”。',
-    // reminders
-    reminders: '提醒',
-    remindersHeader: freeze(['轮次', '提醒日期', '已发', '跳过', '失败', '结果不明', '进行中', '还没处理（已建卡的人）', '本轮 tag']),
-    remindSkipHeader: freeze(['提醒跳过的原因', '第 1 次', '第 2 次']),
-    remindDateChanged: (round, note) => `第 ${round} 次提醒日期：${note}（remind 按现在的日期判断哪天能发）`,
-    audienceTest: '已建卡、卡还没用过（余额等于原金额）、没停用没过期的人（测试活动不看营销订阅状态）',
-    audienceLive: '已建卡、卡还没用过（余额等于原金额）、没停用没过期、仍订阅营销邮件的人',
-    remindNote: (audience) => `提醒只发给${audience}；每一轮每人最多一封：发出后给客户打上本轮 tag，带本轮 tag 的人这一轮不会再发，即使本地日志丢失。跳过的人再次运行同一轮会重新判断。`,
     // usage
     usage: '使用情况',
     asOf: '截至',
@@ -518,11 +449,14 @@ const zh = {
     giftCardPaid: '礼品卡抵扣',
     customerPaid: '顾客另外支付',
     topProducts: '卖得最多的商品',
+    usedTagged: '已打用卡 tag（人）',
+    /** Note next to 已打用卡 tag: this run's tagsAdd results (from the latest usage run's summary). */
+    usedTagNote: (added, failed) => `本次新打 ${added}，失败 ${failed}`,
     dailyTrend: '每日趋势',
     seeUsageReport: '见“使用报告”表',
     // run history
     runs: '运行记录',
-    runsHeader: freeze(['开始时间', '命令', '预演/实际', '批次/轮次', '数量上限', '退出码', '结束时间', '结果摘要']),
+    runsHeader: freeze(['开始时间', '命令', '预演/实际', '批次', '数量上限', '退出码', '结束时间', '结果摘要']),
     running: '运行中',
     notEnded: '没有正常结束（可能被中断）',
     dryRun: '预演',
@@ -563,11 +497,15 @@ const zh = {
       last4: freeze({ title: '卡号后 4 位', help: '卡号的最后 4 位，用来和后台核对。程序从不读取完整卡号。' }),
       createdAt: freeze({ title: '建卡时间', help: '店铺时间。' }),
       taggedAt: freeze({ title: '打 tag 时间', help: '店铺时间。' }),
-      remind1: freeze({ title: '第 1 次提醒', help: (roundTag) => `见“提醒状态”。这一轮的 tag 是 ${roundTag}。` }),
-      remind2: freeze({ title: '第 2 次提醒', help: (roundTag) => `见“提醒状态”。这一轮的 tag 是 ${roundTag}。` }),
       usedAmount: freeze({ title: '已使用金额', help: '最近一次运行 usage 时这张卡已用掉的金额。' }),
       balance: freeze({ title: '剩余余额', help: '最近一次运行 usage 时这张卡的余额。' }),
       usedOrders: freeze({ title: '使用的订单', help: '用这张卡付过款的订单号。' }),
+      usedTag: freeze({
+        title: '用卡 tag',
+        help: (usedTag) =>
+          `客户是否带 ${usedTag}：卡用过（余额小于面额）后，usage 给客户打上这个 tag，Shopify Email 的提醒收件人条件会排除带它的人（见“提醒邮件（Shopify Email）”）。`
+          + '按本地日志（“操作日志”里的“打用卡 tag”）或最近一次 usage 从 Shopify 读到的带 tag 名单显示“是”，否则“否”。',
+      }),
       notes: freeze({ title: '备注/错误', help: '跳过或失败的原因、Shopify 的错误信息，以及金额依据的特殊情况。' }),
       city: freeze({ title: '城市', help: '客户默认地址的城市。' }),
       province: freeze({ title: '州', help: '客户默认地址的州。' }),
@@ -575,17 +513,6 @@ const zh = {
       orderCount: freeze({ title: '订单数', help: '导出时 Shopify 记录的订单数。' }),
       amountSpent: freeze({ title: '累计消费', help: '导出时 Shopify 记录的累计消费。' }),
       accountCreated: freeze({ title: '注册日期', help: '客户账户的创建日期。' }),
-    }),
-    /** 发放名单 第 N 次提醒 cells (see REMIND_HELP); `at` is "MM-DD HH:MM" store time. */
-    remind: freeze({
-      sentAt: (at) => `已发 ${at}`,
-      sent: '已发',
-      skippedFor: (reason) => `跳过：${reason}`,
-      skipped: '跳过',
-      failedWith: (error) => `失败：${error}`,
-      failed: '失败',
-      unknown: '结果不明',
-      inProgress: '进行中',
     }),
     /** 发放名单 备注/错误 (joined with sep.list). */
     notes: freeze({
@@ -630,15 +557,12 @@ const zh = {
 
   // ---- 操作日志
   journal: freeze({
-    header: freeze(['时间', '命令', '批次/轮次', '客户 ID', '动作', '结果/说明', '礼品卡 ID', '错误']),
+    header: freeze(['时间', '命令', '批次', '客户 ID', '动作', '结果/说明', '礼品卡 ID', '错误']),
     amount: (usd) => `金额 ${usd}`,
     last4: (last4) => `卡号后 4 位 ${last4}`,
-    retry: '重新发送（之前失败或结果不明）',
-    /** Instead of the round tag's name when an entry has no round. */
-    roundTagFallback: '本轮 tag',
-    alreadyTagged: (tag) => `Shopify 上已带 ${tag}`,
-    tagMissing: (tag) => `${tag} 没打上，下次运行会补打`,
-    tagRepaired: (tag) => `已补打 ${tag}`,
+    /** used.tag.ok / used.tag.fail results, naming the used-card tag. */
+    usedTagAdded: (tag) => `已打 ${tag}`,
+    usedTagFailed: (tag) => `${tag} 没打上，下次运行 usage 会再试`,
   }),
 
   // ---- 说明
@@ -647,21 +571,19 @@ const zh = {
     sheetsSection: '各表说明',
     sheets: freeze([
       freeze([SHEETS.usageReport, '运行 usage 后出现，排在第一张：发出多少卡、用了多少、带来多少订单和金额、按档位和客户类型的使用率、每日趋势、卖得最多的商品。']),
-      freeze([SHEETS.summary, '活动参数、筛选漏斗、金额、发放进度、提醒、使用情况和运行记录。']),
+      freeze([SHEETS.summary, '活动参数、筛选漏斗、金额、发放进度、使用情况和运行记录。']),
       freeze([SHEETS.recipients, '每个入选者一行，按发放顺序（序号）。整行颜色表示发放状态。前 3 列和表头冻结。']),
       freeze([SHEETS.notSelected, '被排除的人和原因。只因第 1–3 条（没邮箱、平台中转或占位邮箱、未订阅营销邮件）被排除的人不逐行列出，只在“汇总”里计数。']),
       freeze([SHEETS.duplicates, '同一地址的多个候选账户只保留一个（按组着色）；下面另列因同地址账户近期下过单而不发的人。']),
       freeze([SHEETS.usageDetail, '运行 usage 后出现：每笔用本活动礼品卡付款一行；下面另列回执里没有礼品卡 ID、需要人工核对的付款。']),
       freeze([SHEETS.verify, '运行 verify 后出现：本地日志和 Shopify 对不上的地方，以及建议操作。']),
-      freeze([SHEETS.journal, '每次写操作的记录（建卡、打 tag、跳过、提醒），按时间顺序。发提醒后直接打上本轮 tag 的不单独记一行，见“补打本轮 tag”。']),
+      freeze([SHEETS.journal, '每次写操作的记录（建卡、打 tag、跳过、打用卡 tag），按时间顺序。']),
       freeze([SHEETS.help, '本页。']),
     ]),
     columnsSection: '发放名单各列',
     statusSection: '发放状态（发放名单“状态”列和整行颜色）',
-    remindSection: '提醒状态（“第 1 次提醒”“第 2 次提醒”两列）',
-    remindSkipReasons: '提醒跳过的原因',
     issueSkipReasons: '发放前跳过的原因',
-    roundTagSection: '本轮 tag（每一轮每人最多一封提醒）',
+    reminderSection: '提醒邮件（Shopify Email）',
     amountSection: '金额规则',
     testCampaign: '测试活动',
     testAmount: (usd) => `每人固定 ${usd}，不按档位。`,
@@ -707,10 +629,8 @@ const zh = {
   }),
   /** run.end summaries → one line (labels.js summaryText). */
   runSummary: freeze({
-    /** issue's `attempted` in a dry run; remind's `planned` in a dry run / a live run. */
+    /** issue's `attempted` in a dry run. */
     attemptedDry: '将建卡',
-    plannedDry: '将发',
-    plannedLive: '本次要发',
     /** A `true` inside a list. */
     yes: '是',
     /** After the first 10 items of a longer list. */
@@ -748,9 +668,9 @@ const zh = {
     /** A funnel.channels key: the channel label select stored (Chinese labels, or a code). */
     channel: (key) => key,
     /**
-     * A text our own code wrote into the journal: a note (reconcile.none, tag.ok, remind.tag.ok, ...), a skip
-     * detail ('邮箱格式无效', '余额 $5.33 / 面额 $15.33', '到期日 2026-10-19', ...), an error, a run summary
-     * string; also each '；' part of an error and the text before '：' when a Shopify message follows it.
+     * A text our own code wrote into the journal: a note (reconcile.none, tag.ok, ...), a skip detail
+     * ('邮箱格式无效', ...), an error, a run summary string; also each '；' part of an error and the text
+     * before '：' when a Shopify message follows it.
      * Unknown text is returned unchanged.
      */
     text: (s) => s,
@@ -797,15 +717,15 @@ const STATUS_LABELS_EN = freeze({
   skipped: 'Skipped before issuing',
 });
 
-const NO_NEW_CARDS_FROM_REMIND_1_EN = 'From REMIND_1_DATE on, the live campaign\'s issue runs create no new cards.';
+const NO_NEW_CARDS_AFTER_EXPIRY_EN = 'From the gift card expiry date on, issue creates no new cards.';
 
 const STATUS_HELP_EN = freeze({
-  pending: `Not processed yet, or a check confirmed the last attempt created no card; the next issue run processes this person again. ${NO_NEW_CARDS_FROM_REMIND_1_EN}`,
+  pending: `Not processed yet, or a check confirmed the last attempt created no card; the next issue run processes this person again. ${NO_NEW_CARDS_AFTER_EXPIRY_EN}`,
   in_progress: 'issue is processing this person right now. Shown only while issue is running; when it is not, a row stuck here shows "Needs review".',
   unknown: 'Shopify\'s answer was lost, so it is unknown whether the card exists. The next issue or verify run first looks for the card in Shopify: found, it is recorded; not found after 10 minutes, the attempt is confirmed as not created.',
   created: 'The card exists (Shopify has sent the first email automatically) but the tag is still missing. The next issue run only adds the tag; it does not create another card.',
   done: 'Card created and customer tagged.',
-  failed: `Shopify refused to create the card; the reason is in "Notes/errors". Only issue --retry-failed retries it. ${NO_NEW_CARDS_FROM_REMIND_1_EN}`,
+  failed: `Shopify refused to create the card; the reason is in "Notes/errors". Only issue --retry-failed retries it. ${NO_NEW_CARDS_AFTER_EXPIRY_EN}`,
   skipped: 'The pre-flight check found this person no longer qualifies; no card is created. The reason is in "Notes/errors".',
 });
 
@@ -820,31 +740,6 @@ const ISSUE_SKIP_LABELS_EN = freeze({
   'ordered-since-snapshot': 'Ordered after the export',
   'address-ordered-since-snapshot': 'Same-address account ordered after the export',
 });
-
-const REMIND_SKIP_LABELS_EN = freeze({
-  'no-card': 'No card',
-  'multiple-cards': 'More than one card',
-  'card-disabled': 'Card disabled',
-  'card-expired': 'Card expired',
-  used: 'Card already used',
-  'customer-deleted': 'Customer deleted',
-  'no-email': 'No email',
-  'not-subscribed': NOT_SUBSCRIBED_LABEL_EN,
-});
-
-const REMIND_SENT_BY_TAG_EN = 'Sent (recorded from the round tag in Shopify)';
-const REMIND_TAG_MISSING_SUFFIX_EN = '; round tag missing, the next run adds it';
-
-const REMIND_HELP_EN = freeze([
-  freeze(['(blank)', 'This person has not been processed in this round yet.']),
-  freeze(['Sent MM-DD HH:MM', 'Shopify was told to resend the gift card email at this store time; the customer then got this round\'s tag (see "Round tag"). At most one email per person per round.']),
-  freeze([REMIND_SENT_BY_TAG_EN, 'The local journal has no "sent" record for this round (lost, or overwritten by an older backup), but the customer carries this round\'s tag in Shopify, so the reminder counts as sent and is not sent again. The time is unknown.']),
-  freeze([`Sent MM-DD HH:MM${REMIND_TAG_MISSING_SUFFIX_EN}`, 'The reminder went out but tagging the customer with the round tag failed: the journal records it as sent, so this round never emails them again. The next live run of the same round adds the tag first (see "Adding a missing round tag"); once added, the cell shows only "Sent MM-DD HH:MM".']),
-  freeze(['Skipped: reason', `Not eligible this round, e.g. card already used, ${NOT_SUBSCRIBED_LABEL_EN.toLowerCase()}, card disabled or expired. Running the same round again re-evaluates them.`]),
-  freeze(['Failed: reason', 'Shopify refused to send; the reason follows. Not resent automatically; once fixed, remind --retry-failed resends.']),
-  freeze(['Outcome unknown', 'Shopify\'s answer was lost, so it is unknown whether the email went out. Not resent automatically (a resend would always add an email); once checked, remind --retry-unknown resends.']),
-  freeze(['In progress', 'remind is processing this person right now. Shown only while remind is running; otherwise the cell shows "Outcome unknown".']),
-]);
 
 const KIND_LABELS_EN = freeze({ ordered: 'Ordered before', never: 'Never ordered', test: 'Test' });
 
@@ -878,15 +773,8 @@ const OP_LABELS_EN = freeze({
   'tag.ok': 'Tag added',
   'tag.fail': 'Tag failed',
   skip: 'Skipped before issuing',
-  'remind.start': 'Reminder started',
-  'remind.ok': 'Reminder sent',
-  'remind.fail': 'Reminder failed',
-  'remind.rejected': 'Reminder not sent (can retry)',
-  'remind.unknown': 'Reminder outcome unknown',
-  'remind.skip': 'Reminder skipped',
-  'remind.found': 'Recorded as sent from the round tag',
-  'remind.tag.fail': 'Round tag failed',
-  'remind.tag.ok': 'Round tag added',
+  'used.tag.ok': 'Used tag added',
+  'used.tag.fail': 'Used tag failed',
 });
 
 const RECONCILE_SOURCE_LABELS_EN = freeze({
@@ -915,13 +803,6 @@ const SNAPSHOT_SOURCE_LABELS_EN = freeze({
   nodes: 'By customer ID',
 });
 
-const STOP_LABELS_EN = freeze({
-  rejected: 'Stopped: Shopify did not accept the send request',
-  'too-many-failures': 'Stopped: too many consecutive send failures',
-  aborted: 'Interrupted (Ctrl+C)',
-  error: 'Stopped: error',
-});
-
 const NOTE_LABELS_EN = freeze({
   'already tagged in Shopify': 'Already carries this tag in Shopify',
 });
@@ -937,7 +818,7 @@ const UNMATCHED_REASON_LABELS_EN = freeze({
 const EXIT_CODE_HELP_EN = freeze([
   freeze([0, 'Success']),
   freeze([1, 'Stopped midway or failed (the reason is in the command output)']),
-  freeze([2, 'Usage error: bad arguments, missing --limit, campaign date not reached, or past REMIND_1_DATE (issue only records cards and adds tags, creates none) or past REMIND_2_DATE (reminder 1 can no longer be sent)']),
+  freeze([2, 'Usage error: bad arguments, missing --limit, campaign date not reached, or the gift card expiry date has arrived (issue only records cards and adds tags, creates none)']),
   freeze([130, 'Interrupted with Ctrl+C (exits after finishing the current person)']),
 ]);
 
@@ -965,24 +846,9 @@ const SUMMARY_KEY_LABELS_EN = freeze({
   tagFailed: 'tag failed',
   reconciledNone: 'confirmed not created',
   stillUnknown: 'still needing review',
-  newCardsRefused: 'no new card (still pending)',
+  newCardsRefused: 'expiry date reached, no new card (still pending)',
   repairOnly: 'records and tags only',
-  stoppedByDate: 'stopped by date',
-  // remind
-  eligible: 'eligible',
-  planned: 'planned',
-  sent: 'sent',
-  retriedUnknown: 'resent (outcome was unknown)',
-  retriedFailed: 'resent (had failed)',
-  alreadySent: 'sent earlier',
-  previouslyFailed: 'failed earlier',
-  waitingUnknown: 'unknown outcome awaiting review',
-  notIssued: 'no card yet',
-  alreadySentByTag: 'counted as sent from the tag',
-  roundTagged: 'round tag added',
-  roundTagFailed: 'round tag failed',
-  roundTagFixed: 'round tag added later',
-  roundTagMissing: 'round tag missing',
+  stoppedByDate: 'stopped midway (expiry date reached)',
   // usage
   issuedCards: 'cards issued',
   usedCards: 'cards used',
@@ -992,6 +858,9 @@ const SUMMARY_KEY_LABELS_EN = freeze({
   giftCardCents: 'paid by gift card',
   customerPaidCents: 'paid by customer',
   unmatched: 'payments needing review',
+  usedTagged: 'already carrying the used tag',
+  usedTagAdded: 'used tag added',
+  usedTagFailed: 'used tag failed',
   // verify
   cardCount: 'cards',
   taggedCount: 'tagged customers',
@@ -1008,7 +877,6 @@ const SUMMARY_KEY_LABELS_EN = freeze({
   pending: 'pending',
   resolved: 'settled',
   retried: 'retried',
-  reminded: 'reminded',
   cards: 'cards',
   used: 'used',
   payments: 'payments',
@@ -1035,10 +903,6 @@ const en = {
   STATUS_LABELS: STATUS_LABELS_EN,
   STATUS_HELP: STATUS_HELP_EN,
   ISSUE_SKIP_LABELS: ISSUE_SKIP_LABELS_EN,
-  REMIND_SKIP_LABELS: REMIND_SKIP_LABELS_EN,
-  REMIND_SENT_BY_TAG: REMIND_SENT_BY_TAG_EN,
-  REMIND_TAG_MISSING_SUFFIX: REMIND_TAG_MISSING_SUFFIX_EN,
-  REMIND_HELP: REMIND_HELP_EN,
   KIND_LABELS: KIND_LABELS_EN,
   MARKETING_LABELS: MARKETING_LABELS_EN,
   BASIS_NOTES: BASIS_NOTES_EN,
@@ -1047,7 +911,6 @@ const en = {
   RECONCILE_SOURCE_LABELS: RECONCILE_SOURCE_LABELS_EN,
   VERIFY_TYPE_LABELS: VERIFY_TYPE_LABELS_EN,
   SNAPSHOT_SOURCE_LABELS: SNAPSHOT_SOURCE_LABELS_EN,
-  STOP_LABELS: STOP_LABELS_EN,
   NOTE_LABELS: NOTE_LABELS_EN,
   UNMATCHED_REASON_LABELS: UNMATCHED_REASON_LABELS_EN,
   EXIT_CODE_HELP: EXIT_CODE_HELP_EN,
@@ -1055,10 +918,10 @@ const en = {
   GID_TYPE_LABELS: GID_TYPE_LABELS_EN,
   SUMMARY_KEY_LABELS: SUMMARY_KEY_LABELS_EN,
 
-  roundTagHelp: (tag1, tag2) => [
-    ['Round tag', `Reminder 1 uses ${tag1}, reminder 2 uses ${tag2}; the rounds are independent. Every reminder sent tags the customer with that round's tag.`],
-    ['People carrying the round tag', `Every remind run (dry runs too) first looks up the customers carrying this round's tag in Shopify: they count as already reminded this round and are never sent again, not even with --retry-unknown or --retry-failed. So even when the local journal is lost or overwritten by an old backup, nobody gets a second email in the same round; a live run records them in the local journal as "${REMIND_SENT_BY_TAG_EN}".`],
-    ['Adding a missing round tag', `A failed round tag does not affect the reminder already sent (the local journal records it as sent); the "${SHEETS_EN.journal}" sheet gets a row "${OP_LABELS_EN['remind.tag.fail']}". The next live run of the same round adds the tag first; people whose reminder went out 10 minutes ago or more but who have no round tag in Shopify (e.g. the tag was removed in the admin) get it again too. When the tag is added, or turns out to be in Shopify after all, a row "${OP_LABELS_EN['remind.tag.ok']}" is written. A tag added right after sending gets no row of its own; it is only counted in the run history.`],
+  reminderHelp: (sentTag, usedTag, condition) => [
+    ['How reminders are sent', `The program no longer sends reminder emails; they go out with Shopify Email. Before a reminder, run usage once so that everyone who used their card carries ${usedTag}; then send from Shopify Email with the recipient condition below.`],
+    ['Recipient condition', condition],
+    ['Used tag', `${usedTag}: every usage run (DRY_RUN does not matter) first looks up the customers already carrying this tag in Shopify, then tags the owner of every card whose balance is below its face value and who does not carry it yet; the "${SHEETS_EN.journal}" sheet gets a row "${OP_LABELS_EN['used.tag.ok']}". A failure is only a warning, written as "${OP_LABELS_EN['used.tag.fail']}"; the next usage run tries again. The program never removes tags.`],
   ],
 
   sep: freeze({
@@ -1071,7 +934,6 @@ const en = {
   no: 'No',
   notSet: 'not set',
   timeZone: freeze({ default: 'Los Angeles time', other: (tz) => `${tz} time` }),
-  roundName: (round) => `Reminder ${round}`,
   fmt: freeze({
     cards: '#,##0" cards"',
     orders: '#,##0" orders"',
@@ -1102,6 +964,7 @@ const en = {
     byKind: freeze(['By customer type', 'Issued', 'Used', 'Usage rate', 'Used amount']),
     daily: freeze(['Daily', 'Cards first used that day', 'Orders that day', 'Order total that day', 'Cards used to date', 'Usage rate to date']),
     topProducts: freeze(['Top 10 products', 'Quantity', 'Amount']),
+    usedTag: (n, added, failed) => `Used tag on ${n} ${String(n) === '1' ? 'customer' : 'customers'} (${added} added this run, ${failed} failed)`,
     footer: (asOf, tz) => `As of ${asOf} (${tz}). Run usage once a day to refresh this sheet; a card counts as used once its balance is below the original amount.`,
   }),
 
@@ -1136,8 +999,6 @@ const en = {
     expiryNote: 'The card still works on the expiry date itself',
     expiryChanged: (env, frozen) => `The card still works on the expiry date itself. Note: GIFT_CARD_EXPIRES_ON in .env is now ${env}, but cards are still created with ${frozen}, frozen when the list was generated`,
     launchDate: 'First email date (live card creation)',
-    remind1Date: 'Reminder 1',
-    remind2Date: 'Reminder 2',
     dateChanged: (then, now) => `${then} when the list was generated, now ${now} per .env`,
     sentTag: 'Sent tag (SENT_TAG)',
     excludeTags: 'Excluded tags (case-insensitive)',
@@ -1194,14 +1055,6 @@ const en = {
     skipReasonsHeader: freeze(['Reasons skipped before issuing', 'People']),
     reasonMissing: 'reason not recorded',
     progressNote: 'Amount: created cards by the card\'s amount, the rest by the list amount. "In progress" appears only while issue is running; otherwise those people count as "Needs review".',
-    // reminders
-    reminders: 'Reminders',
-    remindersHeader: freeze(['Round', 'Reminder date', 'Sent', 'Skipped', 'Failed', 'Outcome unknown', 'In progress', 'Not processed yet (people with a card)', 'Round tag']),
-    remindSkipHeader: freeze(['Reasons reminders were skipped', 'Round 1', 'Round 2']),
-    remindDateChanged: (round, note) => `Reminder ${round} date: ${note} (remind uses the current date to decide when it can send)`,
-    audienceTest: 'people with a card that is unused (balance equals the original amount), enabled and not expired (a test campaign ignores the marketing subscription)',
-    audienceLive: 'people with a card that is unused (balance equals the original amount), enabled and not expired, who are still subscribed to marketing emails',
-    remindNote: (audience) => `Reminders go only to ${audience}; at most one per person per round: after sending, the customer gets this round's tag, and anyone carrying it is not sent again this round, even if the local journal is lost. Skipped people are re-evaluated when the same round runs again.`,
     // usage
     usage: 'Usage',
     asOf: 'As of',
@@ -1215,11 +1068,13 @@ const en = {
     giftCardPaid: 'Paid by gift card',
     customerPaid: 'Paid by customer',
     topProducts: 'Top products',
+    usedTagged: 'Used tag (customers)',
+    usedTagNote: (added, failed) => `${added} added this run, ${failed} failed`,
     dailyTrend: 'Daily trend',
     seeUsageReport: `See the "${SHEETS_EN.usageReport}" sheet`,
     // run history
     runs: 'Run history',
-    runsHeader: freeze(['Started', 'Command', 'Dry run/live', 'Batch/round', 'Limit', 'Exit code', 'Ended', 'Summary']),
+    runsHeader: freeze(['Started', 'Command', 'Dry run/live', 'Batch', 'Limit', 'Exit code', 'Ended', 'Summary']),
     running: 'running',
     notEnded: 'did not end normally (possibly interrupted)',
     dryRun: 'dry run',
@@ -1260,11 +1115,15 @@ const en = {
       last4: freeze({ title: 'Card last 4', help: 'Last 4 characters of the card code, to match against the admin. The program never reads full card codes.' }),
       createdAt: freeze({ title: 'Card created', help: 'Store time.' }),
       taggedAt: freeze({ title: 'Tagged', help: 'Store time.' }),
-      remind1: freeze({ title: 'Reminder 1', help: (roundTag) => `See "Reminder status". This round's tag is ${roundTag}.` }),
-      remind2: freeze({ title: 'Reminder 2', help: (roundTag) => `See "Reminder status". This round's tag is ${roundTag}.` }),
       usedAmount: freeze({ title: 'Used amount', help: 'Amount spent from this card at the latest usage run.' }),
       balance: freeze({ title: 'Balance', help: 'Balance of this card at the latest usage run.' }),
       usedOrders: freeze({ title: 'Orders using the card', help: 'Orders paid with this card.' }),
+      usedTag: freeze({
+        title: 'Used tag',
+        help: (usedTag) =>
+          `Whether the customer carries ${usedTag}: once a card is used (balance below face value), usage tags the customer with it, and the Shopify Email recipient condition leaves them out of the reminders (see "Reminder emails (Shopify Email)"). `
+          + `"Yes" from the local journal (a "${OP_LABELS_EN['used.tag.ok']}" row in the ${SHEETS_EN.journal} sheet) or from the tagged customers the latest usage run read from Shopify, otherwise "No".`,
+      }),
       notes: freeze({ title: 'Notes/errors', help: 'Why a row was skipped or failed, Shopify error messages, and special cases of the amount basis.' }),
       city: freeze({ title: 'City', help: 'City of the customer\'s default address.' }),
       province: freeze({ title: 'State', help: 'State of the customer\'s default address.' }),
@@ -1272,16 +1131,6 @@ const en = {
       orderCount: freeze({ title: 'Orders', help: 'Order count in Shopify at export time.' }),
       amountSpent: freeze({ title: 'Total spent', help: 'Total spent in Shopify at export time.' }),
       accountCreated: freeze({ title: 'Signed up', help: 'Creation date of the customer account.' }),
-    }),
-    remind: freeze({
-      sentAt: (at) => `Sent ${at}`,
-      sent: 'Sent',
-      skippedFor: (reason) => `Skipped: ${reason}`,
-      skipped: 'Skipped',
-      failedWith: (error) => `Failed: ${error}`,
-      failed: 'Failed',
-      unknown: 'Outcome unknown',
-      inProgress: 'In progress',
     }),
     notes: freeze({
       interrupted: 'The card request was sent but no outcome was recorded (the run was interrupted), the next issue run first looks for the card in Shopify',
@@ -1325,14 +1174,11 @@ const en = {
 
   // ---- Activity log
   journal: freeze({
-    header: freeze(['Time', 'Command', 'Batch/round', 'Customer ID', 'Action', 'Result/notes', 'Gift card ID', 'Error']),
+    header: freeze(['Time', 'Command', 'Batch', 'Customer ID', 'Action', 'Result/notes', 'Gift card ID', 'Error']),
     amount: (usd) => `amount ${usd}`,
     last4: (last4) => `card last 4 ${last4}`,
-    retry: 'Resent (had failed or outcome unknown)',
-    roundTagFallback: 'the round tag',
-    alreadyTagged: (tag) => `Already carries ${tag} in Shopify`,
-    tagMissing: (tag) => `${tag} not added; the next run adds it`,
-    tagRepaired: (tag) => `${tag} added`,
+    usedTagAdded: (tag) => `${tag} added`,
+    usedTagFailed: (tag) => `${tag} not added; the next usage run tries again`,
   }),
 
   // ---- Help
@@ -1341,21 +1187,19 @@ const en = {
     sheetsSection: 'Sheets',
     sheets: freeze([
       freeze([SHEETS_EN.usageReport, 'Appears after a usage run, as the first sheet: cards issued, cards used, orders and revenue brought in, usage rates by tier and customer type, the daily trend and the top products.']),
-      freeze([SHEETS_EN.summary, 'Campaign parameters, selection funnel, amounts, issuing progress, reminders, usage and run history.']),
+      freeze([SHEETS_EN.summary, 'Campaign parameters, selection funnel, amounts, issuing progress, usage and run history.']),
       freeze([SHEETS_EN.recipients, 'One row per recipient, in issuing order (seq). The row colour shows the issue status. The first 3 columns and the header are frozen.']),
       freeze([SHEETS_EN.notSelected, `Excluded people and why. People excluded only by rules 1-3 (no email, relay or placeholder email, not subscribed to marketing emails) are not listed row by row, only counted in "${SHEETS_EN.summary}".`]),
       freeze([SHEETS_EN.duplicates, 'Several candidate accounts at one address keep only one (coloured by group); below, the people not sent because a same-address account ordered recently.']),
       freeze([SHEETS_EN.usageDetail, 'Appears after a usage run: one row per payment with a campaign gift card; below, payments whose receipt has no gift card ID and need review.']),
       freeze([SHEETS_EN.verify, 'Appears after a verify run: where the local journal and Shopify disagree, with suggested actions.']),
-      freeze([SHEETS_EN.journal, 'Every write operation (card creation, tagging, skips, reminders) in time order. A round tag added right after a reminder gets no row of its own; see "Adding a missing round tag".']),
+      freeze([SHEETS_EN.journal, 'Every write operation (card creation, tagging, skips, the used tag) in time order.']),
       freeze([SHEETS_EN.help, 'This page.']),
     ]),
     columnsSection: `${SHEETS_EN.recipients} columns`,
     statusSection: `Issue status ("Status" column and row colour of ${SHEETS_EN.recipients})`,
-    remindSection: 'Reminder status ("Reminder 1" and "Reminder 2" columns)',
-    remindSkipReasons: 'Reasons reminders were skipped',
     issueSkipReasons: 'Reasons people are skipped before issuing',
-    roundTagSection: 'Round tag (at most one reminder per person per round)',
+    reminderSection: 'Reminder emails (Shopify Email)',
     amountSection: 'Amount rules',
     testCampaign: 'Test campaign',
     testAmount: (usd) => `Fixed ${usd} per person, no tiers.`,
@@ -1396,8 +1240,6 @@ const en = {
   }),
   runSummary: freeze({
     attemptedDry: 'would create',
-    plannedDry: 'would send',
-    plannedLive: 'to send',
     yes: 'yes',
     more: (count) => ` and more (${count} in all)`,
     nested: (parts) => `(${parts})`,
@@ -1469,4 +1311,5 @@ export const CONSOLE = Object.freeze({
   badTimeZone: (tz, fallback) => `时区 "${tz}" 无效，Excel 里的时间改用 ${fallback}`,
   foreignTags: (tag, sentTag) => `tags.json 记录的是 tag "${tag}"，不是本活动的 "${sentTag}"，已忽略`,
   tagsWithoutIds: 'tags.json 里没有客户列表（ids），已忽略',
+  foreignUsedTag: (tag, usedTag) => `usage.json 记录的用卡 tag 是 "${tag}"，不是本活动的 "${usedTag}"，“用卡 tag”列只按本地日志显示`,
 });

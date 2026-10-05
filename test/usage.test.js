@@ -11,6 +11,8 @@ import {
   giftCardIdFromReceipt,
   giftCardOrdersQuery,
   NO_RECEIPT_ID_REASON,
+  usedTagName,
+  reminderSegmentCondition,
 } from '../src/usage.js';
 import { campaignPaths, appendJournal, readJournal, acquireRunLock, runningCommand, writeJsonAtomic } from '../src/campaign.js';
 import { campaignNote } from '../src/giftcards.js';
@@ -120,8 +122,9 @@ function spendScenario() {
   fake.spendCard(gid('GiftCard', 900), 5000);
 }
 
-function installScenario() {
+function installScenario({ customers = fixtureCustomers() } = {}) {
   fake = installFakeShopify({
+    customers,
     giftCards: [
       ...CAMPAIGN_CARDS(),
       card(900, 5, 5000, { note: 'bought in store' }),
@@ -624,9 +627,156 @@ test('usage.json and usage/<store-local date>.json hold the same data; the journ
   const [start, end] = entries;
   assert.deepEqual([start.op, start.command, start.dryRun, start.t], ['run.start', 'usage', false, T.now]);
   assert.deepEqual([end.op, end.run, end.exitCode], ['run.end', start.run, 0]);
-  assert.deepEqual(end.summary, { issuedCards: 7, usedCards: 5, usedCents: 6241, orders: 3, ordersTotalCents: 12033, giftCardCents: 5664, unmatched: 1 });
-  // Read-only: no Shopify writes of any kind.
-  assert.deepEqual([fake.state.calls.create.length, fake.state.calls.tag.length, fake.state.calls.notify.length], [0, 0, 0]);
+  assert.deepEqual(end.summary, {
+    issuedCards: 7, usedCards: 5, usedCents: 6241, orders: 3, ordersTotalCents: 12033, giftCardCents: 5664, unmatched: 1,
+    usedTagged: 0, usedTagAdded: 5, usedTagFailed: 0,
+  });
+  // The used-card tag is the only write: no card is created, no email sent.
+  assert.deepEqual([fake.state.calls.create.length, fake.state.calls.tag.length, fake.state.calls.notify.length], [0, 5, 0]);
+});
+
+// ---------------------------------------------------------------------------
+// The used-card tag
+// ---------------------------------------------------------------------------
+
+const USED_TAG = 'gift-card-sent-2026-10-USED'; // testConfig's SENT_TAG + "-USED"
+const usedTagOps = () => readJournal(paths.journal).filter((e) => e.op.startsWith('used.tag.'));
+
+test('usedTagName / reminderSegmentCondition: "<SENT_TAG>-USED" (a test campaign gets "<SENT_TAG>-USED" of its own tag)', () => {
+  assert.equal(usedTagName('OCT26RTPROMO'), 'OCT26RTPROMO-USED');
+  assert.equal(usedTagName('OCT26RTPROMO-TEST2'), 'OCT26RTPROMO-TEST2-USED');
+  assert.equal(usedTagName(env.config.sentTag), USED_TAG);
+  assert.equal(reminderSegmentCondition('OCT26RTPROMO'), "customer_tags CONTAINS 'OCT26RTPROMO' AND NOT customer_tags CONTAINS 'OCT26RTPROMO-USED'");
+});
+
+test('used cards: their customers get "<SENT_TAG>-USED" once; the journal, the console, run.end and usage.json say so', async () => {
+  await selectionFixture(env.config, { customers: fixtureCustomers() });
+  writeIssueRuns(paths);
+  installScenario();
+  const { exitCode, usage } = await go();
+  assert.equal(exitCode, 0);
+
+  // Used: 501 (c1), 502 (c2), 503 (c3), 504 (c4), 506 (c6). Unused: 505 (c5), 507 (c7, refunded back to full).
+  const used = [1, 2, 3, 4, 6].map((n) => gid('Customer', n));
+  assert.deepEqual(fake.state.calls.tag, used.map((id) => ({ id, tags: [USED_TAG] })));
+  for (const n of [1, 2, 3, 4, 6]) assert.ok(fake.state.customers.find((c) => c.id === gid('Customer', n)).tags.includes(USED_TAG), `customer ${n} tagged`);
+  for (const n of [5, 7]) assert.equal(fake.state.customers.find((c) => c.id === gid('Customer', n)).tags.includes(USED_TAG), false, `customer ${n} not tagged`);
+  // The tag set is read first (so a second run adds nothing), with the exact tag.
+  const lookups = fake.opsNamed('TaggedCustomers');
+  assert.equal(lookups.length, 1);
+  assert.equal(lookups[0].variables.query, `tag:"${USED_TAG}"`);
+
+  // Journal: one used.tag.ok per customer, naming the card and the run.
+  const ops = usedTagOps();
+  const run = readJournal(paths.journal).find((e) => e.op === 'run.start' && e.command === 'usage').run;
+  assert.deepEqual(ops, [[501, 1], [502, 2], [503, 3], [504, 4], [506, 6]].map(([card, n]) => ({
+    t: T.now, op: 'used.tag.ok', cid: gid('Customer', n), giftCardId: gid('GiftCard', card), run,
+  })));
+
+  // usage.json: the tag and everyone carrying it after this run; every other field is still there.
+  assert.deepEqual(usage.usedTag, { tag: USED_TAG, taggedCustomerIds: used });
+  assert.deepEqual(Object.keys(usage), ['version', 'fetchedAt', 'timezone', 'campaignStartIso', 'cards', 'payments', 'orders', 'unmatched', 'summary', 'usedTag']);
+  assert.deepEqual(readUsageFile(paths.usage).usedTag, usage.usedTag);
+
+  // Console: what the step does and the Shopify Email condition, then the counts.
+  assert.match(output(), new RegExp(`INFO 正在给用过卡（余额小于面额）的客户打 tag ${USED_TAG}（不受 DRY_RUN 影响）。提醒邮件用 Shopify Email 发送，收件人条件：customer_tags CONTAINS 'gift-card-sent-2026-10' AND NOT customer_tags CONTAINS '${USED_TAG}'`));
+  assert.match(output(), new RegExp(`INFO   已打用卡 tag ${USED_TAG}：5 人（之前已带 0，本次新打 5，失败 0）`));
+  // run.end
+  const end = readJournal(paths.journal).at(-1);
+  assert.equal(end.op, 'run.end');
+  assert.deepEqual([end.summary.usedTagged, end.summary.usedTagAdded, end.summary.usedTagFailed], [0, 5, 0]);
+});
+
+test('a second usage run adds no tag: Shopify already shows the tag on them; a newly used card is tagged then', async () => {
+  await selectionFixture(env.config, { customers: fixtureCustomers() });
+  writeIssueRuns(paths);
+  installScenario();
+  assert.equal((await go()).exitCode, 0);
+  assert.equal(fake.state.calls.tag.length, 5);
+
+  // Card 505 (customer 5) is used between the two runs.
+  fake.spendCard(gid('GiftCard', 505), 100);
+  log = memoryLog();
+  const { exitCode, usage } = await go({ now: () => new Date('2026-10-10T05:00:00.000Z') });
+  assert.equal(exitCode, 0);
+  assert.deepEqual(fake.state.calls.tag.slice(5), [{ id: gid('Customer', 5), tags: [USED_TAG] }]);
+  assert.deepEqual(usage.usedTag.taggedCustomerIds, [1, 2, 3, 4, 5, 6].map((n) => gid('Customer', n)));
+  assert.match(output(), new RegExp(`已打用卡 tag ${USED_TAG}：6 人（之前已带 5，本次新打 1，失败 0）`));
+  const end = readJournal(paths.journal).at(-1);
+  assert.deepEqual([end.summary.usedTagged, end.summary.usedTagAdded, end.summary.usedTagFailed], [5, 1, 0]);
+  assert.equal(usedTagOps().length, 6, 'no second used.tag.ok for the five already tagged');
+
+  // A third run with nothing new: the lookup only, no tagsAdd, no journal line.
+  log = memoryLog();
+  assert.equal((await go({ now: () => new Date('2026-10-11T05:00:00.000Z') })).exitCode, 0);
+  assert.equal(fake.state.calls.tag.length, 6);
+  assert.equal(usedTagOps().length, 6);
+  assert.match(output(), /已打用卡 tag .*：6 人（之前已带 6，本次新打 0，失败 0）/);
+});
+
+test('a refused tagsAdd is journalled as used.tag.fail and warned about; the run still exits 0 and the next run retries', async () => {
+  await selectionFixture(env.config, { customers: fixtureCustomers() });
+  writeIssueRuns(paths);
+  installScenario();
+  fake.state.failures.TagsAdd = [{ kind: 'userError', message: 'Customer is locked', code: 'LOCKED' }];
+  const { exitCode, usage } = await go();
+  assert.equal(exitCode, 0, 'a failed tag never fails the report');
+  assert.ok(usage);
+
+  // The first customer (501 → customer 1) failed; the other four were tagged.
+  const ops = usedTagOps();
+  assert.equal(ops.length, 5);
+  const [fail, ...oks] = ops;
+  assert.equal(fail.op, 'used.tag.fail');
+  assert.equal(fail.cid, gid('Customer', 1));
+  assert.equal(fail.giftCardId, gid('GiftCard', 501));
+  assert.equal(fail.error, 'tagsAdd rejected: input: Customer is locked [LOCKED]');
+  assert.ok(fail.run);
+  assert.deepEqual(oks.map((e) => e.op), ['used.tag.ok', 'used.tag.ok', 'used.tag.ok', 'used.tag.ok']);
+  assert.match(output(), /WARN   给客户 1 打 gift-card-sent-2026-10-USED 失败：tagsAdd rejected: input: Customer is locked \[LOCKED\]。下次运行 usage 会再试/);
+  assert.match(output(), /已打用卡 tag .*：4 人（之前已带 0，本次新打 4，失败 1）/);
+  assert.deepEqual(usage.usedTag.taggedCustomerIds, [2, 3, 4, 6].map((n) => gid('Customer', n)), 'the failed one is not carrying the tag');
+  const end = readJournal(paths.journal).at(-1);
+  assert.deepEqual([end.exitCode, end.summary.usedTagged, end.summary.usedTagAdded, end.summary.usedTagFailed], [0, 0, 4, 1]);
+
+  // The next run re-reads the tag set and tags the one that failed.
+  log = memoryLog();
+  assert.equal((await go({ now: () => new Date('2026-10-10T05:00:00.000Z') })).exitCode, 0);
+  assert.deepEqual(fake.state.calls.tag.at(-1), { id: gid('Customer', 1), tags: [USED_TAG] });
+  assert.equal(usedTagOps().at(-1).op, 'used.tag.ok');
+  assert.equal(usedTagOps().at(-1).cid, gid('Customer', 1));
+  assert.match(output(), /已打用卡 tag .*：5 人（之前已带 4，本次新打 1，失败 0）/);
+});
+
+test('a dry-run config still tags (the tag is idempotent and harmless)', async () => {
+  env.cleanup();
+  env = testConfig({ DRY_RUN: 'true' });
+  paths = campaignPaths(env.config);
+  assert.equal(env.config.dryRun, true);
+  await selectionFixture(env.config, { customers: fixtureCustomers() });
+  writeIssueRuns(paths);
+  installScenario();
+  const { exitCode } = await go();
+  assert.equal(exitCode, 0);
+  assert.equal(fake.state.calls.tag.length, 5);
+  assert.equal(usedTagOps().filter((e) => e.op === 'used.tag.ok').length, 5);
+  assert.match(output(), /不受 DRY_RUN 影响/);
+});
+
+test('a test campaign tags with "<SENT_TAG>-USED" of its own tag; a used card without a customer is not tagged', async () => {
+  env.cleanup();
+  env = testConfig({ SENT_TAG: 'OCT26RTPROMO-TEST2' });
+  paths = campaignPaths(env.config);
+  await selectionFixture(env.config, { customers: fixtureCustomers() });
+  writeIssueRuns(paths);
+  installScenario();
+  fake.state.giftCards.find((g) => g.id === gid('GiftCard', 503)).customer = null; // a used card with no customer
+  const { exitCode, usage } = await go();
+  assert.equal(exitCode, 0);
+  assert.deepEqual([...new Set(fake.state.calls.tag.flatMap((c) => c.tags))], ['OCT26RTPROMO-TEST2-USED']);
+  assert.deepEqual(fake.state.calls.tag.map((c) => c.id), [1, 2, 4, 6].map((n) => gid('Customer', n)));
+  assert.equal(usage.usedTag.tag, 'OCT26RTPROMO-TEST2-USED');
+  assert.match(output(), /customer_tags CONTAINS 'OCT26RTPROMO-TEST2' AND NOT customer_tags CONTAINS 'OCT26RTPROMO-TEST2-USED'/);
 });
 
 test('run lock: held as "usage" while fetching, released before the Excel is written', async () => {

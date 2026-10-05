@@ -3,9 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { runIssue, SKIP_REASONS, SELECTION_REPLACED, firstEmailStageOn } from '../src/issue.js';
+import { runIssue, SKIP_REASONS, SELECTION_REPLACED, newCardsBlockedOn } from '../src/issue.js';
 import { STATUS, acquireRunLock, appendJournal, campaignPaths, foldJournal, readJournal, writeJsonAtomic } from '../src/campaign.js';
-import { expectedStage } from '../src/preview.js';
 import { buildTestSelection } from '../src/select/selection.js';
 import { parseCustomer } from '../src/select/rules.js';
 import { resetClient } from '../src/shopify.js';
@@ -383,7 +382,7 @@ describe('issue: dry run', () => {
     assert.ok(h.logged('WARN 邮件预览没有生成：template missing'));
   });
 
-  it('the preview is rendered for the day the cards would really be created, with the expiry date they carry', async () => {
+  it('the preview shows the expiry date the cards carry (the one frozen in the list), on any day a card may still be created', async () => {
     await setup({ n: 2, env: { DRY_RUN: 'true' } });
     h.config = { ...h.config, giftCardExpiresOn: '2026-10-20' }; // .env changed after select: cards keep the selection's date
     const previewAt = async (iso) => {
@@ -394,26 +393,23 @@ describe('issue: dry run', () => {
       return h.previews[0];
     };
     const early = await previewAt('2026-10-03T18:00:00Z');
-    assert.equal(early.sendDate, '2026-10-05', 'a real run creates cards from LAUNCH_DATE on');
     assert.equal(early.expiresOn, '2026-10-19');
     assert.equal(h.selection.params.giftCardExpiresOn, '2026-10-19');
     assert.equal(early.variant, 'first');
-    assert.equal((await previewAt('2026-10-05T07:00:00Z')).sendDate, '2026-10-05');
-    assert.equal((await previewAt('2026-10-07T17:00:00Z')).sendDate, '2026-10-07');
-    assert.ok(h.logged('按 2026-10-07 发送时的文案'));
-    assert.equal((await previewAt('2026-10-11T17:00:00Z')).sendDate, '2026-10-11', 'the last day for new cards');
+    assert.equal('sendDate' in early, false, 'the copy no longer depends on the send date');
+    assert.equal((await previewAt('2026-10-05T07:00:00Z')).expiresOn, '2026-10-19');
+    assert.equal((await previewAt('2026-10-13T17:00:00Z')).expiresOn, '2026-10-19', 'the old reminder dates mean nothing any more');
+    assert.ok(h.logged('首封邮件预览（用这一批第 1 个人 #1 的名字和金额）：'));
+    assert.equal((await previewAt('2026-10-19T06:59:00Z')).expiresOn, '2026-10-19', '23:59 on 10/18: the last day for new cards');
 
-    // From REMIND_1_DATE on a real run creates no card, so there is no first email to preview.
-    h.clock.ms = Date.parse('2026-10-13T17:00:00Z');
+    // From the expiry date on a real run creates no card, so there is no first email to preview.
+    h.clock.ms = Date.parse('2026-10-19T07:00:00Z');
     h.previews.length = 0;
     assert.equal((await h.run({ limit: 1 })).exitCode, 0);
     assert.equal(h.previews.length, 0);
-
-    h.config = { ...h.config, launchDate: '' };
-    assert.equal((await previewAt('2026-10-03T18:00:00Z')).sendDate, '2026-10-03', 'without LAUNCH_DATE: today');
   });
 
-  it('a test campaign\'s preview is rendered for today: its cards are created on any day', async () => {
+  it('a test campaign\'s preview is rendered on any day before the expiry date', async () => {
     await setup({
       customers: [makeCustomer({ n: 1 }), makeCustomer({ n: 2 })],
       testCampaign: true,
@@ -421,11 +417,11 @@ describe('issue: dry run', () => {
     });
     h.clock.ms = Date.parse('2026-10-03T18:00:00Z');
     assert.equal((await h.run({ limit: 1 })).exitCode, 0);
-    h.clock.ms = Date.parse('2026-10-13T18:00:00Z');
+    h.clock.ms = Date.parse('2026-10-18T18:00:00Z');
     assert.equal((await h.run({ limit: 1 })).exitCode, 0);
-    assert.deepEqual(h.previews.map((p) => p.sendDate), ['2026-10-03', '2026-10-13']);
+    assert.deepEqual(h.previews.map((p) => p.variant), ['first', 'first']);
     assert.deepEqual(h.previews.map((p) => p.expiresOn), [h.selection.params.giftCardExpiresOn, h.selection.params.giftCardExpiresOn]);
-    assert.equal(h.logged('正式活动要'), false, 'test campaigns get no date warnings');
+    assert.equal(h.logged('正式活动要'), false, 'test campaigns get no launch-date warnings');
   });
 
   it('reports leftovers without touching them, and that a real run would stop', async () => {
@@ -482,53 +478,88 @@ describe('issue: argument and date guards', () => {
     assert.deepEqual(h.createdFor(), [1]);
   });
 
-  it('a real run of the live campaign on or after REMIND_1_DATE (store time) creates no new card: its creation email would show the reminder copy', async () => {
+  it('a real run on or after the cards\' expiry date (store time) creates no new card', async () => {
     await setup({ n: 3 });
-    h.clock.ms = Date.parse('2026-10-12T07:00:00Z'); // 00:00 on REMIND_1_DATE in Los Angeles
+    h.clock.ms = Date.parse('2026-10-19T07:00:00Z'); // 00:00 on GIFT_CARD_EXPIRES_ON (2026-10-19) in Los Angeles
     const late = await h.run({ limit: 1 });
     assert.equal(late.exitCode, 2, 'people are still waiting for a card');
-    assert.ok(h.logged('ERROR 正式活动要在 REMIND_1_DATE（2026-10-12）之前建卡：今天建卡时 Shopify 发出的首封邮件会显示提醒的文案。'
-      + '确需补发，请先改 .env 的提醒日期、运行 node index.js preview，并把模板重新贴到 Shopify 后台。'
-      + '本次只做了补记和补打 tag，没有建新卡；还有 3 人待建卡。'));
+    assert.ok(h.logged(`ERROR ${D2_TEXT}本次只做了补记和补打 tag，没有建新卡；还有 3 人待建卡。`));
+    assert.ok(h.logged('INFO 现在是店铺时间 2026-10-19 00:00'));
     assert.equal(h.fake.opsNamed('GiftCardCreate').length, 0);
     assert.equal(h.fake.opsNamed('TagsAdd').length, 0);
     assert.equal(h.reports.length, 1, 'the Excel is still refreshed');
     assert.equal(late.summary.newCardsRefused, 3, 'the run history says why nothing was created');
     assert.equal(h.journal().filter((e) => e.op === 'run.end').at(-1).summary.newCardsRefused, 3);
     assert.equal(late.summary.attempted, 0);
+    assert.equal(h.logged('REMIND'), false);
 
-    h.clock.ms = Date.parse('2026-10-19T17:00:00Z');
+    h.clock.ms = Date.parse('2026-10-25T17:00:00Z'); // long after
     assert.equal((await h.run({ limit: 1 })).exitCode, 2);
     assert.equal(h.fake.opsNamed('GiftCardCreate').length, 0);
 
-    h.clock.ms = Date.parse('2026-10-12T06:59:00Z'); // 23:59 on 10/11 in Los Angeles: the last day for new cards
+    h.clock.ms = Date.parse('2026-10-19T06:59:00Z'); // 23:59 on 10/18 in Los Angeles: the last day for new cards
     const lastDay = await h.run({ limit: 1 });
     assert.equal(lastDay.exitCode, 0);
     assert.deepEqual(h.createdFor(), [1]);
+    assert.ok(h.logged('INFO 真实运行：会建礼品卡'));
   });
 
-  it('on or after REMIND_1_DATE a real run still adds a missing tag and records cards Shopify already has, without creating cards', async () => {
+  it('the old reminder dates (10/12, 10/16) no longer block anything: cards are created until the day before expiry', async () => {
+    await setup({ n: 4 });
+    for (const [k, iso] of [[1, '2026-10-12T07:00:00Z'], [2, '2026-10-12T00:30:00Z'], [3, '2026-10-16T17:00:00Z'], [4, '2026-10-18T23:00:00Z']]) {
+      h.clock.ms = Date.parse(iso);
+      assert.equal((await h.run({ limit: 1 })).exitCode, 0, iso);
+      assert.equal(h.createdFor().at(-1), k);
+    }
+    assert.deepEqual(h.createdFor(), [1, 2, 3, 4]);
+    assert.equal(h.log.lines.some((l) => /REMIND|UTC 已是|提醒的文案/.test(l)), false, h.log.lines.join('\n'));
+  });
+
+  it('the rule is the expiry frozen in the list, not today\'s .env; a list without an expiry date is never blocked', async () => {
+    await setup({ n: 3 });
+    h.config = { ...h.config, giftCardExpiresOn: '2026-10-30' }; // .env moved after select: cards are still made with 10/19
+    h.clock.ms = Date.parse('2026-10-19T17:00:00Z');
+    assert.equal((await h.run({ limit: 1 })).exitCode, 2);
+    assert.ok(h.logged('礼品卡到期日（2026-10-19）已到'));
+    assert.ok(h.logged('注意：.env 的 GIFT_CARD_EXPIRES_ON（2026-10-30）和生成名单时（2026-10-19）不一样'));
+    assert.deepEqual(h.createdFor(), []);
+    assert.equal(newCardsBlockedOn(h.selection, '2026-10-18'), false);
+    assert.equal(newCardsBlockedOn(h.selection, '2026-10-19'), true);
+    assert.equal(newCardsBlockedOn(h.selection, '2027-01-01'), true);
+
+    // The list says the cards never expire: no date ever blocks a card.
+    writeJsonAtomic(h.paths.selection, { ...h.selection, params: { ...h.selection.params, giftCardExpiresOn: '' } });
+    h.config = { ...h.config, giftCardExpiresOn: '' };
+    h.clock.ms = Date.parse('2026-12-01T17:00:00Z');
+    assert.equal((await h.run({ limit: 1 })).exitCode, 0);
+    assert.deepEqual(h.createdFor(), [1]);
+    assert.equal(h.fake.state.calls.create[0].expiresOn, undefined);
+    assert.equal(newCardsBlockedOn({ params: { giftCardExpiresOn: '' } }, '2027-01-01'), false);
+    assert.equal(newCardsBlockedOn({ params: {} }, '2027-01-01'), false);
+  });
+
+  it('on or after the expiry date a real run still adds a missing tag and records cards Shopify already has, without creating cards', async () => {
     await setup({ n: 3, failures: { TagsAdd: [{ kind: 'userError', message: 'temporarily unavailable' }] } });
-    h.clock.ms = Date.parse('2026-10-11T17:00:00Z');
+    h.clock.ms = Date.parse('2026-10-18T17:00:00Z');
     assert.equal((await h.run({ limit: 1 })).exitCode, 0);
     assert.equal(h.statusOf(1), STATUS.CREATED, 'card created, tag failed');
 
-    h.clock.ms = Date.parse('2026-10-13T17:00:00Z');
+    h.clock.ms = Date.parse('2026-10-20T17:00:00Z');
     const repair = await h.run({ limit: 5 });
     assert.equal(repair.exitCode, 2, 'customers 2 and 3 still have no card');
     assert.equal(h.statusOf(1), STATUS.DONE, 'the missing tag was added');
-    assert.deepEqual(h.createdFor(), [1], 'no new card on or after REMIND_1_DATE');
+    assert.deepEqual(h.createdFor(), [1], 'no new card on or after the expiry date');
     assert.ok(h.logged('还有 2 人待建卡'));
   });
 
-  it('a dry run on or after REMIND_1_DATE follows the same rule: no simulated card, no preview, a warning, exit 0', async () => {
+  it('a dry run on or after the expiry date follows the same rule: no simulated card, no preview, a warning, exit 0', async () => {
     await setup({ n: 2, env: { DRY_RUN: 'true' } });
-    h.clock.ms = Date.parse('2026-10-13T17:00:00Z');
+    h.clock.ms = Date.parse('2026-10-20T17:00:00Z');
     const { exitCode, summary } = await h.run({ limit: 1 });
     assert.equal(exitCode, 0);
     assertSummary(summary, { attempted: 0, created: 0, amountCents: 0, seqFrom: null, newCardsRefused: 2 });
-    assert.ok(h.logged('WARN 注意：正式活动要在 REMIND_1_DATE（2026-10-12）之前建卡：今天建卡时 Shopify 发出的首封邮件会显示提醒的文案。'));
-    assert.ok(h.logged('WARN 预演：真实运行今天只会补记和补打 tag，不会建新卡；还有 2 人待建卡。'));
+    assert.ok(h.logged(`WARN 注意：${D2_TEXT}`));
+    assert.ok(h.logged('WARN 预演：真实运行只会补记和补打 tag，不会建新卡（礼品卡到期日 2026-10-19 已到）；还有 2 人待建卡。'));
     assert.equal(h.logged('这一批会给'), false, 'no simulated creates');
     assert.equal(h.previews.length, 0, 'no first-email preview');
     assert.ok(h.logged('将建卡：0 张'));
@@ -538,17 +569,24 @@ describe('issue: argument and date guards', () => {
     assert.equal(h.journal()[1].summary.newCardsRefused, 2);
   });
 
-  it('a test campaign may also run on or after REMIND_1_DATE', async () => {
+  it('a test campaign is bound to the expiry date too (an expired card is of no use), but not to LAUNCH_DATE', async () => {
     await setup({
-      customers: [makeCustomer({ n: 1 })],
+      customers: [makeCustomer({ n: 1 }), makeCustomer({ n: 2 })],
       testCampaign: true,
-      env: { CAMPAIGN_ID: '2026-10-test', SENT_TAG: 'OCT26RTPROMO-TEST', TEST_CUSTOMER_IDS: '1' },
+      env: { CAMPAIGN_ID: '2026-10-test', SENT_TAG: 'OCT26RTPROMO-TEST', TEST_CUSTOMER_IDS: '1,2' },
     });
     h.clock.ms = Date.parse('2026-10-16T17:00:00Z');
-    const { exitCode } = await h.run({ limit: 1 });
-    assert.equal(exitCode, 0);
+    assert.equal((await h.run({ limit: 1 })).exitCode, 0);
     assert.deepEqual(h.createdFor(), [1]);
-    assert.equal(h.logged('REMIND_1_DATE'), false);
+    assert.equal(h.fake.state.calls.create[0].expiresOn, '2026-10-19');
+
+    h.clock.ms = Date.parse('2026-10-19T07:00:00Z'); // 00:00 on the expiry date
+    const late = await h.run({ limit: 1 });
+    assert.equal(late.exitCode, 2);
+    assert.deepEqual(h.createdFor(), [1]);
+    assert.ok(h.logged(`ERROR ${D2_TEXT}本次只做了补记和补打 tag，没有建新卡；还有 1 人待建卡。`));
+    assert.ok(h.logged('已到礼品卡到期日（2026-10-19）：只补记和补打 tag，不建新卡'));
+    assert.equal(late.summary.newCardsRefused, 1);
   });
 
   it('a test campaign may run before LAUNCH_DATE and is not filtered by audience rules', async () => {
@@ -583,11 +621,11 @@ describe('issue: argument and date guards', () => {
 
   it('refuses to run while another write command holds the lock', async () => {
     await setup({ n: 2 });
-    const release = acquireRunLock(h.paths, 'remind');
+    const release = acquireRunLock(h.paths, 'verify');
     try {
       const { exitCode } = await h.run({ limit: 1 });
       assert.equal(exitCode, 1);
-      assert.ok(h.logged('remind 正在运行'));
+      assert.ok(h.logged('verify 正在运行'));
       assert.equal(h.fake.state.calls.token.length, 0);
       assert.equal(fs.existsSync(h.paths.journal), false);
     } finally {
@@ -618,7 +656,7 @@ describe('issue: argument and date guards', () => {
     assert.equal(fs.existsSync(h.paths.journal), false);
     assert.deepEqual(h.createdFor(), []);
     assert.equal(h.reports.length, 0);
-    acquireRunLock(h.paths, 'remind')(); // the lock was released
+    acquireRunLock(h.paths, 'verify')(); // the lock was released
 
     const next = await h.run({ limit: 1 }); // the next run issues from the list on disk
     assert.equal(next.exitCode, 0);
@@ -636,29 +674,30 @@ function slowCreates(ms) {
   };
 }
 
-const D2_TEXT = '正式活动要在 REMIND_1_DATE（2026-10-12）之前建卡：今天建卡时 Shopify 发出的首封邮件会显示提醒的文案。'
-  + '确需补发，请先改 .env 的提醒日期、运行 node index.js preview，并把模板重新贴到 Shopify 后台。';
-const NO_NEW_CARDS = '正式活动从 REMIND_1_DATE（2026-10-12）起不再建新卡';
+// The refusal text on or after the cards' expiry date (testConfig: GIFT_CARD_EXPIRES_ON=2026-10-19).
+const D2_TEXT = '礼品卡到期日（2026-10-19）已到，不再建新卡：现在建的卡客户已经用不了。'
+  + '确需补发，请改 .env 的 GIFT_CARD_EXPIRES_ON，换一个新的 CAMPAIGN_ID 重新运行 select。';
+const NO_NEW_CARDS = '礼品卡到期日（2026-10-19）已到，不再建新卡';
 const TZ = 'America/Los_Angeles';
 
 describe('issue: the date is checked again before every card', () => {
-  it('a real run that crosses midnight into REMIND_1_DATE stops before the next card (exit 2); what was done stays', async () => {
+  it('a real run that crosses midnight into the expiry date stops before the next card (exit 2); what was done stays', async () => {
     await setup({ n: 6 });
-    h.clock.ms = Date.parse('2026-10-12T06:57:30Z'); // 23:57:30 on 10/11 in Los Angeles
-    slowCreates(MINUTE); // cards at 23:57:30, 23:58:30, 23:59:30; the 4th would be at 00:00:30 on 10/12
+    h.clock.ms = Date.parse('2026-10-19T06:57:30Z'); // 23:57:30 on 10/18 in Los Angeles
+    slowCreates(MINUTE); // cards at 23:57:30, 23:58:30, 23:59:30; the 4th would be at 00:00:30 on 10/19
     const { exitCode, summary } = await h.run({ limit: 6 });
     assert.equal(exitCode, 2);
     assert.deepEqual(h.createdFor(), [1, 2, 3]);
-    assert.deepEqual(h.fake.state.giftCards.map((g) => localDate(Date.parse(g.createdAt), TZ)), ['2026-10-11', '2026-10-11', '2026-10-11']);
-    assert.deepEqual(h.journal().filter((e) => e.op === 'create.start').map((e) => localDate(Date.parse(e.t), TZ)), ['2026-10-11', '2026-10-11', '2026-10-11']);
+    assert.deepEqual(h.fake.state.giftCards.map((g) => localDate(Date.parse(g.createdAt), TZ)), ['2026-10-18', '2026-10-18', '2026-10-18']);
+    assert.deepEqual(h.journal().filter((e) => e.op === 'create.start').map((e) => localDate(Date.parse(e.t), TZ)), ['2026-10-18', '2026-10-18', '2026-10-18']);
     for (const k of [1, 2, 3]) assert.equal(h.statusOf(k), STATUS.DONE, 'cards made before midnight are kept and tagged');
     for (const k of [4, 5, 6]) assert.equal(h.statusOf(k), STATUS.PENDING);
-    assert.ok(h.logged(`ERROR ${D2_TEXT}已处理的人都记在本地日志里；剩下的 3 人今天不会再建卡。`));
-    assert.ok(h.logged('现在是店铺时间 2026-10-12 00:00'));
-    assertSummary(summary, { attempted: 3, created: 3, tagged: 3, stoppedByDate: '2026-10-12' });
+    assert.ok(h.logged(`ERROR ${D2_TEXT}已处理的人都记在本地日志里；剩下的 3 人不会再建卡。`));
+    assert.ok(h.logged('现在是店铺时间 2026-10-19 00:00'));
+    assertSummary(summary, { attempted: 3, created: 3, tagged: 3, stoppedByDate: '2026-10-19' });
     const end = h.journal().at(-1);
     assertSummary(end, { op: 'run.end', exitCode: 2 });
-    assert.equal(end.summary.stoppedByDate, '2026-10-12');
+    assert.equal(end.summary.stoppedByDate, '2026-10-19');
     assert.equal(h.reports.length, 1, 'the Excel is still refreshed');
 
     // The next run that day only repairs (D2), and says how many are still waiting.
@@ -671,34 +710,45 @@ describe('issue: the date is checked again before every card', () => {
   it('the re-check counts only the people this run had left; skipped people before the stop stay skipped', async () => {
     await setup({ n: 5 });
     h.customer(2).defaultEmailAddress.marketingState = 'UNSUBSCRIBED';
-    h.clock.ms = Date.parse('2026-10-12T06:59:00Z'); // 23:59 on 10/11
-    slowCreates(MINUTE); // #1 at 23:59; #2 is skipped (no card); #3 would be created at 00:00 on 10/12
+    h.clock.ms = Date.parse('2026-10-19T06:59:00Z'); // 23:59 on 10/18
+    slowCreates(MINUTE); // #1 at 23:59; #2 is skipped (no card); #3 would be created at 00:00 on 10/19
     const { exitCode, summary } = await h.run({ limit: 5 });
     assert.equal(exitCode, 2);
     assert.deepEqual(h.createdFor(), [1]);
     assert.equal(h.statusOf(2), STATUS.SKIPPED);
     assert.deepEqual(summary.skipped, { 'not-subscribed': 1 });
-    assert.ok(h.logged('剩下的 3 人今天不会再建卡。'));
-    assert.equal(summary.stoppedByDate, '2026-10-12');
+    assert.ok(h.logged('剩下的 3 人不会再建卡。'));
+    assert.equal(summary.stoppedByDate, '2026-10-19');
   });
 
-  it('a test campaign is not stopped when its run crosses midnight', async () => {
+  it('a test campaign is stopped too when its run crosses midnight into the expiry date', async () => {
     await setup({
       customers: [1, 2, 3].map((n) => makeCustomer({ n })),
       testCampaign: true,
       env: { CAMPAIGN_ID: '2026-10-test', SENT_TAG: 'OCT26RTPROMO-TEST', TEST_CUSTOMER_IDS: '1,2,3' },
     });
-    h.clock.ms = Date.parse('2026-10-12T06:58:30Z');
+    h.clock.ms = Date.parse('2026-10-19T06:58:30Z');
+    slowCreates(MINUTE); // #1 at 23:58:30, #2 at 23:59:30; #3 would be at 00:00:30 on 10/19
+    const { exitCode, summary } = await h.run({ limit: 3 });
+    assert.equal(exitCode, 2);
+    assert.deepEqual(h.createdFor(), [1, 2]);
+    assert.equal(summary.stoppedByDate, '2026-10-19');
+  });
+
+  it('crossing midnight into any other day (the old reminder dates included) never stops a run', async () => {
+    await setup({ n: 3 });
+    h.clock.ms = Date.parse('2026-10-12T06:58:30Z'); // 23:58:30 on 10/11: the 3rd card is made at 00:00:30 on 10/12
     slowCreates(MINUTE);
     const { exitCode, summary } = await h.run({ limit: 3 });
     assert.equal(exitCode, 0);
     assert.deepEqual(h.createdFor(), [1, 2, 3]);
+    assert.deepEqual(h.fake.state.giftCards.map((g) => localDate(Date.parse(g.createdAt), TZ)), ['2026-10-11', '2026-10-11', '2026-10-12']);
     assert.equal(summary.stoppedByDate, undefined);
   });
 
   it('a run that stays on one day is never stopped by the re-check', async () => {
     await setup({ n: 3 });
-    h.clock.ms = Date.parse('2026-10-11T17:00:00Z');
+    h.clock.ms = Date.parse('2026-10-18T17:00:00Z');
     slowCreates(MINUTE);
     const { exitCode, summary } = await h.run({ limit: 3 });
     assert.equal(exitCode, 0);
@@ -707,12 +757,12 @@ describe('issue: the date is checked again before every card', () => {
   });
 });
 
-describe('issue: on or after REMIND_1_DATE (no new cards)', () => {
+describe('issue: on or after the expiry date (no new cards)', () => {
   it('the dry run shows what the real run will do: both create nothing and report the same people waiting', async () => {
     await setup({ n: 5 });
     h.clock.ms = Date.parse('2026-10-05T17:00:00Z');
     assert.equal((await h.run({ limit: 3 })).exitCode, 0);
-    h.clock.ms = Date.parse('2026-10-12T17:00:00Z');
+    h.clock.ms = Date.parse('2026-10-19T17:00:00Z');
     const mark = h.log.lines.length;
     const dry = await h.run({ limit: 5, config: { ...h.config, dryRun: true } });
     const live = await h.run({ limit: 5 });
@@ -723,22 +773,22 @@ describe('issue: on or after REMIND_1_DATE (no new cards)', () => {
     assert.equal(live.summary.created, 0);
     assert.equal(dry.summary.newCardsRefused, 2);
     assert.equal(live.summary.newCardsRefused, 2);
-    assert.ok(h.logged('WARN 预演：真实运行今天只会补记和补打 tag，不会建新卡；还有 2 人待建卡。'));
+    assert.ok(h.logged('WARN 预演：真实运行只会补记和补打 tag，不会建新卡（礼品卡到期日 2026-10-19 已到）；还有 2 人待建卡。'));
     assert.ok(h.logged(`ERROR ${D2_TEXT}本次只做了补记和补打 tag，没有建新卡；还有 2 人待建卡。`));
     assert.equal(h.logged('这一批会给'), false);
     assert.equal(h.previews.length, 0);
     assert.deepEqual(h.createdFor(), [1, 2, 3]);
-    assert.equal(lines.filter((l) => l.includes('已到 REMIND_1_DATE（2026-10-12）：只补记和补打 tag，不建新卡')).length, 2, 'both banners say it from the start');
+    assert.equal(lines.filter((l) => l.includes('已到礼品卡到期日（2026-10-19）：只补记和补打 tag，不建新卡')).length, 2, 'both banners say it from the start');
     assert.ok(lines.includes('INFO 真实运行：只补记 Shopify 上已有的卡、补打 tag gift-card-sent-2026-10；不建新卡，不发邮件'));
     assert.equal(lines.some((l) => l.includes('真实运行：会建礼品卡')), false, 'the live banner does not promise cards');
   });
 
   it('a dry run still simulates the tag repair and settles nothing for real', async () => {
     await setup({ n: 2, failures: { TagsAdd: [{ kind: 'userError', message: 'locked' }] } });
-    h.clock.ms = Date.parse('2026-10-11T17:00:00Z');
+    h.clock.ms = Date.parse('2026-10-18T17:00:00Z');
     assert.equal((await h.run({ limit: 1 })).exitCode, 0);
     assert.equal(h.statusOf(1), STATUS.CREATED);
-    h.clock.ms = Date.parse('2026-10-13T17:00:00Z');
+    h.clock.ms = Date.parse('2026-10-20T17:00:00Z');
     const dry = await h.run({ config: { ...h.config, dryRun: true } });
     assert.equal(dry.exitCode, 0);
     assertSummary(dry.summary, { tagFixed: 1, attempted: 0, newCardsRefused: 1 });
@@ -751,7 +801,7 @@ describe('issue: on or after REMIND_1_DATE (no new cards)', () => {
     await setup({ n: 3 });
     h.clock.ms = Date.parse('2026-10-05T17:00:00Z');
     assert.equal((await h.run({ limit: 1 })).exitCode, 0);
-    h.clock.ms = Date.parse('2026-10-13T17:00:00Z');
+    h.clock.ms = Date.parse('2026-10-20T17:00:00Z');
     const r = await h.run({ limit: 5, retryFailed: true });
     assert.equal(r.exitCode, 2);
     assert.ok(h.logged('INFO 没有建卡失败、待重试的人'));
@@ -766,7 +816,7 @@ describe('issue: on or after REMIND_1_DATE (no new cards)', () => {
     h.clock.ms = Date.parse('2026-10-05T17:00:00Z');
     assert.equal((await h.run({ limit: 1 })).exitCode, 0);
     assert.equal(h.statusOf(1), STATUS.FAILED);
-    h.clock.ms = Date.parse('2026-10-13T17:00:00Z');
+    h.clock.ms = Date.parse('2026-10-20T17:00:00Z');
     const r = await h.run({ limit: 5, retryFailed: true });
     assert.equal(r.exitCode, 2);
     assert.ok(h.logged('还有 1 人待建卡。'));
@@ -779,7 +829,7 @@ describe('issue: on or after REMIND_1_DATE (no new cards)', () => {
     await setup({ n: 2 });
     h.clock.ms = Date.parse('2026-10-05T17:00:00Z');
     assert.equal((await h.run({ limit: 2 })).exitCode, 0);
-    h.clock.ms = Date.parse('2026-10-13T17:00:00Z');
+    h.clock.ms = Date.parse('2026-10-20T17:00:00Z');
     const normal = await h.run({ limit: 1 });
     assert.equal(normal.exitCode, 0);
     assert.ok(h.logged('INFO 没有待建卡的人；已完成补记和补打 tag（如果有）'));
@@ -792,9 +842,9 @@ describe('issue: on or after REMIND_1_DATE (no new cards)', () => {
   it('a tag repair that fails again is reported, never as done: exit 1 when nobody else waits, 2 when people do', async () => {
     const twice = () => [{ kind: 'userError', message: 'locked' }, { kind: 'userError', message: 'still locked' }];
     await setup({ n: 1, failures: { TagsAdd: twice() } });
-    h.clock.ms = Date.parse('2026-10-11T17:00:00Z');
+    h.clock.ms = Date.parse('2026-10-18T17:00:00Z');
     assert.equal((await h.run({ limit: 1 })).exitCode, 0);
-    h.clock.ms = Date.parse('2026-10-12T17:00:00Z');
+    h.clock.ms = Date.parse('2026-10-19T17:00:00Z');
     const alone = await h.run({ limit: 1 });
     assert.equal(alone.exitCode, 1);
     assert.equal(h.statusOf(1), STATUS.CREATED, 'the tag is still missing');
@@ -810,9 +860,9 @@ describe('issue: on or after REMIND_1_DATE (no new cards)', () => {
     h.cleanup();
     resetClient();
     await setup({ n: 3, failures: { TagsAdd: twice() } });
-    h.clock.ms = Date.parse('2026-10-11T17:00:00Z');
+    h.clock.ms = Date.parse('2026-10-18T17:00:00Z');
     assert.equal((await h.run({ limit: 1 })).exitCode, 0);
-    h.clock.ms = Date.parse('2026-10-12T17:00:00Z');
+    h.clock.ms = Date.parse('2026-10-19T17:00:00Z');
     const waiting = await h.run({ limit: 1 });
     assert.equal(waiting.exitCode, 2);
     assert.ok(h.logged('WARN 有 1 人补打 tag 失败，下次运行会再试'));
@@ -820,14 +870,14 @@ describe('issue: on or after REMIND_1_DATE (no new cards)', () => {
     assert.equal(h.logged('已完成补记和补打 tag'), false);
   });
 
-  it('an open outcome on or after REMIND_1_DATE: the texts say it is settled as not created, never that it is issued again', async () => {
+  it('an open outcome on or after the expiry date: the texts say it is settled as not created, never that it is issued again', async () => {
     await setup({ n: 2 });
-    h.clock.ms = Date.parse('2026-10-12T17:00:00Z');
+    h.clock.ms = Date.parse('2026-10-19T17:00:00Z');
     crashedCreateStart(1, h.clock.ms - 2 * MINUTE); // 2 minutes ago: too early to tell
     const first = await h.run({ limit: 1 });
     assert.equal(first.exitCode, 1);
     const stop = h.log.lines.find((l) => l.includes('之后再运行'));
-    assert.ok(stop.endsWith(`请在 2026-10-12 10:08（店铺时间）之后再运行：那时仍查不到的，程序会确认没有建成；${NO_NEW_CARDS}。也可以先在 Shopify 后台的礼品卡列表里按客户核对。`), stop);
+    assert.ok(stop.endsWith(`请在 2026-10-19 10:08（店铺时间）之后再运行：那时仍查不到的，程序会确认没有建成；${NO_NEW_CARDS}。也可以先在 Shopify 后台的礼品卡列表里按客户核对。`), stop);
 
     h.clock.ms += 15 * MINUTE;
     const second = await h.run({ limit: 1 });
@@ -841,72 +891,33 @@ describe('issue: on or after REMIND_1_DATE (no new cards)', () => {
     assert.equal(h.log.lines.some((l) => /重新发放|重新排队/.test(l)), false, h.log.lines.join('\n'));
   });
 
-  it('an open outcome just before midnight: the next run settles it on REMIND_1_DATE, so no re-issue is promised', async () => {
+  it('an open outcome just before midnight: the next run settles it on the expiry date, so no re-issue is promised', async () => {
     await setup({ n: 2, failures: { GiftCardCreate: [{ kind: 'network' }] } });
-    h.clock.ms = Date.parse('2026-10-12T06:55:00Z'); // 23:55 on 10/11
+    h.clock.ms = Date.parse('2026-10-19T06:55:00Z'); // 23:55 on 10/18
     const lost = await h.run({ limit: 1, reconcileWaitMs: 0 });
     assert.equal(lost.exitCode, 1);
-    assert.ok(h.logged(`请在 2026-10-12 00:05（店铺时间）之后再运行：程序会先核对这张卡；查不到的确认没有建成，${NO_NEW_CARDS}`));
-    h.clock.ms = Date.parse('2026-10-12T06:58:00Z'); // 23:58 on 10/11: still too early to settle
+    assert.ok(h.logged(`请在 2026-10-19 00:05（店铺时间）之后再运行：程序会先核对这张卡；查不到的确认没有建成，${NO_NEW_CARDS}`));
+    h.clock.ms = Date.parse('2026-10-19T06:58:00Z'); // 23:58 on 10/18: still too early to settle
     const early = await h.run({ limit: 1 });
     assert.equal(early.exitCode, 1);
-    assert.ok(h.logged(`请在 2026-10-12 00:05（店铺时间）之后再运行：那时仍查不到的，程序会确认没有建成；${NO_NEW_CARDS}。`));
+    assert.ok(h.logged(`请在 2026-10-19 00:05（店铺时间）之后再运行：那时仍查不到的，程序会确认没有建成；${NO_NEW_CARDS}。`));
     assert.equal(h.log.lines.some((l) => /重新发放|重新排队/.test(l)), false, h.log.lines.join('\n'));
   });
 });
 
-describe('issue: UTC evening warning', () => {
-  const utcLines = () => h.log.lines.filter((l) => l.includes('UTC 已是'));
-
-  it('a real run in the Los Angeles evening before REMIND_1_DATE warns once that a UTC-dated template would show the reminder copy', async () => {
-    await setup({ n: 2 });
-    h.clock.ms = Date.parse('2026-10-12T00:30:00Z'); // 17:30 on 10/11 in Los Angeles
+describe('issue: no UTC-evening warning any more (the email copy no longer depends on the send date)', () => {
+  it('a real run in the Los Angeles evening creates cards without any warning about UTC or the copy', async () => {
+    await setup({ n: 3 });
+    h.clock.ms = Date.parse('2026-10-12T00:30:00Z'); // 17:30 on 10/11 in Los Angeles, already 10/12 in UTC
     const { exitCode } = await h.run({ limit: 2 });
-    assert.equal(exitCode, 0, 'only a warning');
+    assert.equal(exitCode, 0);
     assert.deepEqual(h.createdFor(), [1, 2]);
-    assert.deepEqual(utcLines(), ['WARN 现在店铺时间 2026-10-11 17:30，UTC 已是 2026-10-12：如果 Shopify 按 UTC 日期选邮件文案，'
-      + '今天建卡发出的首封邮件会显示第一次提醒文案。建议在洛杉矶时间 17:00 之前运行。']);
-  });
-
-  it('no warning when the UTC day shows the same copy, in the daytime, in dry runs, for test campaigns, or when no card is created', async () => {
-    await setup({ n: 4 });
-    h.clock.ms = Date.parse('2026-10-06T00:30:00Z'); // 17:30 on 10/5: UTC's 10/6 still shows the first copy
-    assert.equal((await h.run({ limit: 1 })).exitCode, 0);
-    h.clock.ms = Date.parse('2026-10-11T17:00:00Z'); // 10:00 on 10/11
-    assert.equal((await h.run({ limit: 1 })).exitCode, 0);
-    h.clock.ms = Date.parse('2026-10-12T00:30:00Z'); // 17:30 on 10/11
+    assert.equal(h.log.lines.some((l) => l.startsWith('WARN ')), false, h.log.lines.join('\n'));
+    // The evening before the expiry date is still a normal day: the store's calendar decides, not UTC's.
+    h.clock.ms = Date.parse('2026-10-19T00:30:00Z'); // 17:30 on 10/18
     assert.equal((await h.run({ limit: 1, config: { ...h.config, dryRun: true } })).exitCode, 0);
-    assert.equal((await h.run({ repairOnly: true })).exitCode, 0);
-    h.clock.ms = Date.parse('2026-10-16T00:30:00Z'); // 17:30 on 10/15: no new card at all on/after REMIND_1_DATE
-    assert.equal((await h.run({ limit: 1 })).exitCode, 2);
-    assert.deepEqual(utcLines(), []);
-
-    h.fake.restore();
-    h.cleanup();
-    resetClient();
-    await setup({
-      customers: [makeCustomer({ n: 1 })],
-      testCampaign: true,
-      env: { CAMPAIGN_ID: '2026-10-test', SENT_TAG: 'OCT26RTPROMO-TEST', TEST_CUSTOMER_IDS: '1' },
-    });
-    h.clock.ms = Date.parse('2026-10-12T00:30:00Z');
-    assert.equal((await h.run({ limit: 1 })).exitCode, 0);
-    assert.deepEqual(utcLines(), []);
-  });
-
-  it('the copy rule is preview.expectedStage for the first email', () => {
-    const configs = [
-      { remind1Date: '2026-10-12', remind2Date: '2026-10-16' },
-      { remind1Date: '2026-10-12', remind2Date: '' },
-      { remind1Date: '', remind2Date: '' },
-    ];
-    for (const config of configs) {
-      for (let d = 1; d <= 31; d += 1) {
-        const date = `2026-10-${String(d).padStart(2, '0')}`;
-        assert.equal(firstEmailStageOn(config, date), expectedStage(config, 'first', date), `${JSON.stringify(config)} ${date}`);
-      }
-    }
-    assert.equal(firstEmailStageOn(configs[0], '2026-10-16'), 'remind2');
+    assert.equal(h.log.lines.some((l) => l.startsWith('WARN ')), false, h.log.lines.join('\n'));
+    assert.equal(h.previews.length, 1, 'the dry run still previews the first email');
   });
 });
 
@@ -929,7 +940,7 @@ describe('issue --repair-only', () => {
     assert.ok(h.logged('确认上次没有建成：1 人；本次是 --repair-only，不建新卡'));
   });
 
-  it('before REMIND_1_DATE, without --limit: adds the missing tag, creates no card, exit 0', async () => {
+  it('before the expiry date, without --limit: adds the missing tag, creates no card, exit 0', async () => {
     await setup({ n: 5, failures: { TagsAdd: [{ kind: 'userError', message: 'locked' }] } });
     assert.equal((await h.run({ limit: 2 })).exitCode, 0); // 10/5: #1's tag failed
     assert.equal(h.statusOf(1), STATUS.CREATED);
@@ -995,11 +1006,11 @@ describe('issue --repair-only', () => {
     assert.equal(h.fake.opsNamed('GiftCardCreate').length + h.fake.opsNamed('TagsAdd').length, 0);
   });
 
-  it('runs on any day: before LAUNCH_DATE, and after REMIND_1_DATE with people waiting (exit 0, not 2)', async () => {
+  it('runs on any day: before LAUNCH_DATE, and after the expiry date with people waiting (exit 0, not 2)', async () => {
     await setup({ n: 2 });
     h.clock.ms = Date.parse('2026-10-03T18:00:00Z');
     assert.equal((await h.run({ repairOnly: true })).exitCode, 0);
-    h.clock.ms = Date.parse('2026-10-13T17:00:00Z');
+    h.clock.ms = Date.parse('2026-10-20T17:00:00Z');
     const late = await h.run({ repairOnly: true });
     assert.equal(late.exitCode, 0);
     assert.equal(h.logged('ERROR'), false);
@@ -1063,7 +1074,7 @@ describe('issue: lost answers and leftovers', () => {
     assert.equal(h.statusOf(1), STATUS.UNKNOWN);
     assert.ok(h.logged('还有 1 人的建卡结果需要确认'));
     assert.ok(h.logged('请在 2026-10-05 10:10（店铺时间）之后再运行：那时仍查不到的，程序会确认没有建成并重新发放；也可以先在 Shopify 后台的礼品卡列表里按客户核对。'));
-    assert.ok(h.logged('请在 2026-10-05 10:10（店铺时间）之后再运行：程序会先核对这张卡，查不到才会重新发放'), 'before REMIND_1_DATE a re-issue is promised');
+    assert.ok(h.logged('请在 2026-10-05 10:10（店铺时间）之后再运行：程序会先核对这张卡，查不到才会重新发放'), 'before the expiry date a re-issue is promised');
 
     h.clock.ms = t0 + 11 * MINUTE;
     const third = await h.run({ limit: 2 });

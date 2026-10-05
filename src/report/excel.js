@@ -36,12 +36,11 @@ import {
   labelOf,
   storedLabelOf,
   issueSkipText,
-  remindSkipText,
   noteText,
   errorText,
   summaryText,
-  roundTagName,
-  roundTagHelp,
+  usedTagName,
+  reminderHelp,
 } from './labels.js';
 
 export const DEFAULT_TIMEZONE = 'America/Los_Angeles';
@@ -76,48 +75,6 @@ export function effectiveStatus(status, running) {
 export function statusLabel(status, running, lang = 'zh') {
   const s = effectiveStatus(status, running);
   return textFor(lang).STATUS_LABELS[s] ?? String(s);
-}
-
-/** Reminder status as shown: a stale in_progress (remind not running) is unknown. */
-export function effectiveRemindStatus(status, running) {
-  return status === 'in_progress' && running !== 'remind' ? 'unknown' : status;
-}
-
-/**
- * Text of a "第 N 次提醒" cell for one reminder state from foldJournal
- * ({ status, at, reason, error, source, tagError, ... } or undefined), times in store-local `tz`,
- * in `lang` ('zh' | 'en' | a text pack).
- * A sent state with source 'tag' was found by its round tag in Shopify (remind.found: the
- * journal had no send, so there is no time); a tagError means the round tag is still missing.
- */
-export function remindLabel(reminder, running, tz = DEFAULT_TIMEZONE, lang = 'zh') {
-  if (!reminder || !reminder.status) return '';
-  const T = textFor(lang);
-  const R = T.recipients.remind;
-  switch (effectiveRemindStatus(reminder.status, running)) {
-    case 'sent': {
-      let text;
-      if (reminder.source === 'tag') {
-        text = T.REMIND_SENT_BY_TAG;
-      } else {
-        const at = clockFor(tz).stamp(reminder.at);
-        text = at ? R.sentAt(at.slice(5)) : R.sent;
-      }
-      return reminder.tagError !== undefined && reminder.tagError !== null ? `${text}${T.REMIND_TAG_MISSING_SUFFIX}` : text;
-    }
-    case 'skipped':
-      return reminder.reason ? R.skippedFor(labelOf(T.REMIND_SKIP_LABELS, reminder.reason)) : R.skipped;
-    case 'failed': {
-      const error = errorText(reminder.error, T);
-      return error ? R.failedWith(error) : R.failed;
-    }
-    case 'unknown':
-      return R.unknown;
-    case 'in_progress':
-      return R.inProgress;
-    default:
-      return String(reminder.status);
-  }
 }
 
 /** Numeric part of a Shopify gid ("gid://shopify/Customer/123" → "123"); '' when there is none. */
@@ -912,6 +869,23 @@ function buildContext({ config, selection, entries, journal, tags, verify, usage
     return !!state?.taggedAt || inSnapshot;
   };
 
+  /**
+   * "用卡 tag": the customer carries "<SENT_TAG>-USED" when the journal recorded usage adding it
+   * (used.tag.ok, the latest outcome) or the latest usage run read the customer from Shopify's
+   * tag set (usage.json usedTag.taggedCustomerIds). A usage.json about another campaign's tag
+   * is ignored with a warning.
+   */
+  const usedTag = usedTagName(sentTag);
+  let usedTaggedIds = new Set();
+  if (usage?.usedTag && typeof usage.usedTag === 'object') {
+    if (String(usage.usedTag.tag ?? '').toLowerCase() !== usedTag.toLowerCase()) {
+      warn(CONSOLE.foreignUsedTag(usage.usedTag.tag, usedTag));
+    } else if (Array.isArray(usage.usedTag.taggedCustomerIds)) {
+      usedTaggedIds = new Set(usage.usedTag.taggedCustomerIds);
+    }
+  }
+  const hasUsedTag = (state, customerId) => state?.usedTag?.status === 'tagged' || usedTaggedIds.has(customerId);
+
   // usage.json indexes
   const cards = objects(usage?.cards);
   const payments = objects(usage?.payments);
@@ -930,9 +904,9 @@ function buildContext({ config, selection, entries, journal, tags, verify, usage
     orderNamesByCard.get(p.giftCardId).add(p.orderName || ordersById.get(p.orderId)?.orderName || numericId(p.orderId));
   }
 
-  // Campaign dates. LAUNCH_DATE / REMIND_n_DATE are shown as the commands
-  // check them now (.env); the expiry as frozen in the list, because every card
-  // is created with that one. A difference to the list gets a note (summary sheet).
+  // Campaign dates. LAUNCH_DATE is shown as issue checks it now (.env); the
+  // expiry as frozen in the list, because every card is created with that one.
+  // A difference to the list gets a note (summary sheet).
   const dateSetting = (current, frozen) => {
     const now = current || '';
     const then = frozen ?? null; // null: a list written without this parameter, nothing to compare
@@ -942,8 +916,6 @@ function buildContext({ config, selection, entries, journal, tags, verify, usage
   const expiryFrozen = params.giftCardExpiresOn || '';
   const dates = {
     launch: dateSetting(config.launchDate, params.launchDate),
-    remind1: dateSetting(config.remind1Date, params.remind1Date),
-    remind2: dateSetting(config.remind2Date, params.remind2Date),
     expiry: { frozen: expiryFrozen, env: config.giftCardExpiresOn || '', changed: expiryFrozen !== (config.giftCardExpiresOn || '') },
   };
 
@@ -982,6 +954,8 @@ function buildContext({ config, selection, entries, journal, tags, verify, usage
     inactiveMonths: params.inactiveMonths ?? config.inactiveMonths,
     dates,
     hasTag,
+    usedTag,
+    hasUsedTag,
     cardsById,
     ordersById,
     orderNamesByCard,
@@ -1008,31 +982,20 @@ function buildContext({ config, selection, entries, journal, tags, verify, usage
       const d = clock.dayNumber(iso);
       return d === null || exportedDay === null ? null : exportedDay - d;
     },
-    /** This campaign's tag for reminder `round` (1 / '1' / 2 / '2'), e.g. OCT26RTPROMO-R1; null for any other round. */
-    roundTag(round) {
-      const n = Number(round);
-      return n === 1 || n === 2 ? roundTagName(sentTag, n) : null;
-    },
-    remindWarn(state, round) {
-      const st = state?.reminders?.[round]?.status;
-      if (!st) return false;
-      const eff = effectiveRemindStatus(st, running);
-      return eff === 'failed' || eff === 'unknown';
-    },
     ordersText(card) {
       const names = card ? orderNamesByCard.get(card.giftCardId) : null;
       return names?.size ? txt([...names].filter(Boolean).join(', ')) : null;
     },
   };
   base.progress = computeProgress(rows);
-  base.reminders = computeReminders(rows, running);
   base.usageSummary = usage ? normalizeUsageSummary(usage, cards) : null;
+  base.usedTagStats = usage ? usedTagStats(usage, usedTaggedIds, journal.runs) : null;
   return base;
 }
 
 /** The context of one edition: the shared data plus the texts of pack `T` (ctx.T, ctx.lang). */
 function localize(base, T) {
-  const { running, timeZone, tiersCents } = base;
+  const { timeZone, tiersCents } = base;
   const ctx = {
     ...base,
     T,
@@ -1041,9 +1004,6 @@ function localize(base, T) {
     tierText(r) {
       if (r.kind === 'test') return T.recipients.testTier;
       return Number.isInteger(r.tier) ? txt(tierLabel(r.tier, tiersCents)) : null;
-    },
-    remindText(state, round) {
-      return txt(remindLabel(state?.reminders?.[round], running, timeZone, T));
     },
   };
   ctx.notesFor = (x) => recipientNotes(x, ctx);
@@ -1097,37 +1057,23 @@ function computeProgress(rows) {
   return { byStatus, total: { count, cents }, skipReasons, nextPendingSeq };
 }
 
-function computeReminders(rows, running) {
-  const result = {};
-  for (const round of ['1', '2']) {
-    const c = { sent: 0, skipped: 0, failed: 0, unknown: 0, inProgress: 0, notYet: 0, reasons: new Map() };
-    for (const row of rows) {
-      const rs = row.state?.reminders?.[round];
-      if (!rs || !rs.status) {
-        if (row.state?.giftCardId) c.notYet += 1;
-        continue;
-      }
-      switch (effectiveRemindStatus(rs.status, running)) {
-        case 'sent':
-          c.sent += 1;
-          break;
-        case 'skipped':
-          c.skipped += 1;
-          c.reasons.set(rs.reason ?? '', (c.reasons.get(rs.reason ?? '') ?? 0) + 1);
-          break;
-        case 'failed':
-          c.failed += 1;
-          break;
-        case 'in_progress':
-          c.inProgress += 1;
-          break;
-        default:
-          c.unknown += 1;
-      }
-    }
-    result[round] = c;
-  }
-  return result;
+/**
+ * The used-card tag figures of the 使用报告 / 汇总: how many customers carry the tag after the latest
+ * usage run (usage.json usedTag.taggedCustomerIds; older files: the latest usage run's counters),
+ * and how many that run added / failed to add (its run.end summary usedTagAdded / usedTagFailed).
+ */
+function usedTagStats(usage, usedTaggedIds, runs) {
+  const latest = runs
+    .filter((r) => r.command === 'usage' && r.summary && typeof r.summary === 'object' && !Array.isArray(r.summary))
+    .sort((a, b) => String(a.startedAt).localeCompare(String(b.startedAt)))
+    .at(-1)?.summary ?? {};
+  const n = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+  const fromFile = Array.isArray(usage.usedTag?.taggedCustomerIds) ? usedTaggedIds.size : null;
+  return {
+    tagged: fromFile ?? n(latest.usedTagged) + n(latest.usedTagAdded),
+    added: n(latest.usedTagAdded),
+    failed: n(latest.usedTagFailed),
+  };
 }
 
 /** usage.json summary with rates recomputed from the counts (robust to fraction vs percent). */
@@ -1204,6 +1150,8 @@ async function writeUsageReportSheet(book, ctx) {
   await s.add([null, null, money(u.giftCardCents), money(u.customerPaidCents)], [null, null, prefixedMoney(P.giftCardPaid), prefixedMoney(P.customerPaid)]);
   // The gift-card part at checkout and the used amount (card balances) differ after a refund back to a card.
   await s.add([T.USAGE_SPLIT_NOTE], NOTE);
+  const ut = ctx.usedTagStats;
+  await s.add([U.usedTag(fmtCount(ut.tagged), fmtCount(ut.added), fmtCount(ut.failed))], label);
 
   await s.blank();
   await s.header(U.byTier);
@@ -1251,8 +1199,7 @@ async function writeSummarySheet(book, ctx) {
   const stats = selection.stats ?? {};
   const funnel = selection.funnel ?? null;
   const snapshot = selection.snapshot ?? {};
-  // The 9th column is only used by the reminders table (round tag).
-  const s = book.sheet(T.sheets.summary, { widths: [40, 18, 14, 14, 14, 12, 18, 70, 24] });
+  const s = book.sheet(T.sheets.summary, { widths: [40, 18, 14, 14, 14, 12, 18, 70] });
   const plain = (kind) => cellStyle(kind, null, false);
   const kv = (label, value, kind = 'text', note = null, noteStyle = NOTE) => s.add([label, value ?? null, note ?? null], [LABEL, plain(kind), noteStyle]);
   const section = async (title) => {
@@ -1292,8 +1239,8 @@ async function writeSummarySheet(book, ctx) {
     await kv(S.neverAmount, money(selection.neverAmountCents), 'money');
   }
   // The expiry is frozen in the list (every card is created with it); the
-  // launch and reminder dates are the current .env values the commands check.
-  const { expiry, launch, remind1, remind2 } = ctx.dates;
+  // launch date is the current .env value issue checks.
+  const { expiry, launch } = ctx.dates;
   await kv(
     S.expiry,
     expiry.frozen ? ctx.ymd(expiry.frozen) : S.noExpiry,
@@ -1301,9 +1248,7 @@ async function writeSummarySheet(book, ctx) {
     expiry.changed ? S.expiryChanged(expiry.env || T.notSet, expiry.frozen || S.noExpiry) : S.expiryNote,
     expiry.changed ? CHANGED : NOTE,
   );
-  for (const [label, date] of [[S.launchDate, launch], [S.remind1Date, remind1], [S.remind2Date, remind2]]) {
-    await kv(label, ctx.ymd(date.current) ?? T.notSet, 'date', date.changed ? changedNote(date) : null, CHANGED);
-  }
+  await kv(S.launchDate, ctx.ymd(launch.current) ?? T.notSet, 'date', launch.changed ? changedNote(launch) : null, CHANGED);
   await kv(S.sentTag, ctx.sentTag);
   if (!ctx.isTest) {
     const list = (v, f = String) => (Array.isArray(v) ? txt(v.map(f).join(', ')) : txt(v));
@@ -1383,38 +1328,6 @@ async function writeSummarySheet(book, ctx) {
   }
   await s.add([S.progressNote], NOTE);
 
-  // ---- reminders
-  const rem = ctx.reminders;
-  await section(S.reminders);
-  await s.header(S.remindersHeader);
-  for (const round of ['1', '2']) {
-    const c = rem[round];
-    const date = round === '1' ? remind1 : remind2;
-    await trow([T.roundName(round), ctx.ymd(date.current) ?? T.notSet, c.sent, c.skipped, c.failed, c.unknown, c.inProgress, c.notYet, ctx.roundTag(round)], [
-      'text',
-      'date',
-      'count',
-      'count',
-      'count',
-      'count',
-      'count',
-      'count',
-      'text',
-    ]);
-  }
-  const reasons = [...new Set([...rem['1'].reasons.keys(), ...rem['2'].reasons.keys()])];
-  if (reasons.length) {
-    await s.blank();
-    await s.header(S.remindSkipHeader);
-    for (const reason of reasons) {
-      await trow([remindSkipText(reason, undefined, undefined, T) || S.reasonMissing, rem['1'].reasons.get(reason) ?? 0, rem['2'].reasons.get(reason) ?? 0], ['text', 'count', 'count']);
-    }
-  }
-  for (const [round, date] of [['1', remind1], ['2', remind2]]) {
-    if (date.changed) await s.add([S.remindDateChanged(round, changedNote(date))], CHANGED);
-  }
-  await s.add([S.remindNote(ctx.isTest ? S.audienceTest : S.audienceLive)], NOTE);
-
   // ---- usage
   if (ctx.usageSummary) {
     const u = ctx.usageSummary;
@@ -1430,6 +1343,8 @@ async function writeSummarySheet(book, ctx) {
     await kv(S.giftCardPaid, money(u.giftCardCents), 'money', T.USAGE_SPLIT_NOTE);
     await kv(S.customerPaid, money(u.customerPaidCents), 'money');
     if (u.topProducts.length) await kv(S.topProducts, txt(u.topProducts.slice(0, 3).map((x) => `${T.stored.productName(x.name)} × ${x.quantity}`).join(T.sep.list)));
+    const ut = ctx.usedTagStats;
+    await kv(S.usedTagged, ut.tagged, 'count', S.usedTagNote(fmtCount(ut.added), fmtCount(ut.failed)));
     await kv(S.dailyTrend, S.seeUsageReport);
   }
 
@@ -1442,7 +1357,7 @@ async function writeSummarySheet(book, ctx) {
   for (const run of runs) {
     let summary = summaryText(run.summary, { command: run.command, dryRun: run.dryRun }, T);
     if (!run.endedAt) summary = ctx.running === run.command && lastOpen.get(run.command) === run ? S.running : S.notEnded;
-    await trow([ctx.time(run.startedAt), txt(run.command), run.dryRun ? S.dryRun : S.live, runBatchText(run, T), num(run.limit), num(run.exitCode), ctx.time(run.endedAt), txt(summary)], [
+    await trow([ctx.time(run.startedAt), txt(run.command), run.dryRun ? S.dryRun : S.live, runBatchText(run), num(run.limit), num(run.exitCode), ctx.time(run.endedAt), txt(summary)], [
       'datetime',
       'text',
       'text',
@@ -1464,11 +1379,7 @@ function sourceText(source, T) {
   return label.toLowerCase() === String(source).toLowerCase() ? label : T.summary.sourceWithCode(label, source);
 }
 
-function runBatchText(run, T) {
-  if (run.command === 'remind') {
-    const round = run.options?.round ?? run.round;
-    return round ? T.roundName(round) : null;
-  }
+function runBatchText(run) {
   return Number.isInteger(run.batch) ? String(run.batch) : null;
 }
 
@@ -1507,11 +1418,10 @@ function recipientColumns(ctx) {
     { ...text('last4'), width: 9, kind: 'text', value: (x) => txt(x.state?.last4) },
     { ...text('createdAt'), width: 16, kind: 'datetime', value: (x, c) => c.time(x.state?.createdAt) },
     { ...text('taggedAt'), width: 16, kind: 'datetime', value: (x, c) => c.time(x.state?.taggedAt) },
-    { ...text('remind1', ctx.roundTag(1)), width: 20, kind: 'text', value: (x, c) => c.remindText(x.state, '1'), warn: (x, c) => c.remindWarn(x.state, '1') },
-    { ...text('remind2', ctx.roundTag(2)), width: 20, kind: 'text', value: (x, c) => c.remindText(x.state, '2'), warn: (x, c) => c.remindWarn(x.state, '2') },
     { ...text('usedAmount'), width: 11, kind: 'money', value: (x) => (x.card ? money(x.card.usedCents) : null) },
     { ...text('balance'), width: 11, kind: 'money', value: (x) => (x.card ? money(x.card.balanceCents) : null) },
     { ...text('usedOrders'), width: 16, kind: 'text', value: (x, c) => c.ordersText(x.card) },
+    { ...text('usedTag', ctx.usedTag), width: 10, kind: 'text', value: (x, c) => (c.hasUsedTag(x.state, x.r.customerId) ? T.yes : T.no) },
     { ...text('notes'), width: 44, kind: 'text', value: (x, c) => c.notesFor(x) },
     { ...text('city'), width: 14, kind: 'text', value: (x) => txt(x.r.city) },
     { ...text('province'), width: 6, kind: 'text', value: (x) => txt(x.r.provinceCode) },
@@ -1758,20 +1668,10 @@ function entryResult(e, ctx) {
       return [labelOf(T.RECONCILE_SOURCE_LABELS, e.source), amount, last4].filter(Boolean).join(T.sep.comma);
     case 'skip':
       return issueSkipText(e.reason, e.detail, detail, T);
-    case 'remind.skip':
-      return remindSkipText(e.reason, e.detail, detail, T);
-    case 'remind.start':
-      return e.retry ? J.retry : noteText(e.note, T);
-    case 'remind.found':
-      return J.alreadyTagged(ctx.roundTag(e.round) ?? J.roundTagFallback);
-    case 'remind.tag.fail':
-      return J.tagMissing(ctx.roundTag(e.round) ?? J.roundTagFallback);
-    case 'remind.tag.ok': {
-      // the repair: the tag added again, or (note) already in Shopify although its tagsAdd looked failed
-      const tag = ctx.roundTag(e.round) ?? J.roundTagFallback;
-      if (e.note === 'already tagged in Shopify') return J.alreadyTagged(tag);
-      return e.note ? noteText(e.note, T) : J.tagRepaired(tag);
-    }
+    case 'used.tag.ok':
+      return J.usedTagAdded(ctx.usedTag);
+    case 'used.tag.fail':
+      return J.usedTagFailed(ctx.usedTag);
     default:
       return noteText(e.note, T);
   }
@@ -1786,13 +1686,10 @@ async function writeJournalSheet(book, ctx) {
   for (const e of ctx.entries) {
     if (!e || typeof e.op !== 'string' || e.op.startsWith('run.')) continue;
     const run = ctx.runsById.get(e.run);
-    const isRemind = e.op.startsWith('remind.');
-    let batch = null;
-    if (isRemind) batch = e.round !== undefined && e.round !== null ? T.roundName(e.round) : null;
-    else if (Number.isInteger(e.batch ?? run?.batch)) batch = String(e.batch ?? run.batch);
-    // Entries whose run.start is missing: the op itself tells remind and issue
+    const batch = Number.isInteger(e.batch ?? run?.batch) ? String(e.batch ?? run.batch) : null;
+    // Entries whose run.start is missing: the op itself tells usage and issue
     // apart; reconcile.* can also come from verify, so it stays blank.
-    const command = run?.command ?? (isRemind ? 'remind' : /^(create|tag)\.|^skip$/.test(e.op) ? 'issue' : null);
+    const command = run?.command ?? (/^used\.tag\./.test(e.op) ? 'usage' : /^(create|tag)\.|^skip$/.test(e.op) ? 'issue' : null);
     await s.add(
       [
         ctx.time(e.t),
@@ -1837,16 +1734,10 @@ async function writeHelpSheet(book, ctx) {
   for (const status of STATUS_ORDER) {
     await s.add([T.STATUS_LABELS[status], T.STATUS_HELP[status]], [cellStyle('text', STATUS_FILLS[status] ?? null), item]);
   }
+  await rows([[H.issueSkipReasons, Object.values(T.ISSUE_SKIP_LABELS).join(T.sep.enum)]]);
 
-  await section(H.remindSection);
-  await rows(T.REMIND_HELP);
-  await rows([
-    [H.remindSkipReasons, Object.values(T.REMIND_SKIP_LABELS).join(T.sep.enum)],
-    [H.issueSkipReasons, Object.values(T.ISSUE_SKIP_LABELS).join(T.sep.enum)],
-  ]);
-
-  await section(H.roundTagSection);
-  await rows(roundTagHelp(ctx.sentTag, T));
+  await section(H.reminderSection);
+  await rows(reminderHelp(ctx.sentTag, T));
 
   await section(H.amountSection);
   const percent = ctx.params.giftPercent ?? ctx.config.giftPercent;

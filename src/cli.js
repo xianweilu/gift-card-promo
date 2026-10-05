@@ -12,20 +12,18 @@ export const USAGE = `用法：node index.js <命令> [选项]
                                        第 2 步：建卡（Shopify 自动发首封邮件）并打 tag；默认只预演
                                        --retry-failed 只重试"失败"的人
                                        --repair-only 只补记和补打 tag，不建新卡（不需要 --limit）
-  remind --round 1|2 [--limit N] [--retry-unknown] [--retry-failed]
-                                       提醒：给还没用过卡的人重发礼品卡邮件；默认只预演
-                                       --retry-unknown 补发"结果不明"的人（确认他们没收到后再用）
-                                       --retry-failed 重发"失败"（被 Shopify 拒绝）的人（原因解决后再用）
-  usage                                每日使用情况：卡有没有被用、用在哪笔订单、买了什么（只读）
+  usage                                每日使用情况：卡有没有被用、用在哪笔订单、买了什么；给用过卡的人打 <SENT_TAG>-USED（只读卡和订单）
   verify                               与 Shopify 核对已建的卡和 tag（只读）
   export [--refresh] [--out <路径>]     重新生成 Excel；--refresh 先从 Shopify 刷新 tag 列；--out 另存一份
-  preview [first|remind1|remind2|original] [--seq N] [--open]
-                                       本地预览邮件（不连 Shopify）；不写邮件名 = 四种都生成
+  preview [first|original] [--seq N] [--open]
+                                       本地预览邮件（不连 Shopify）；不写邮件名 = 两种都生成
                                        --seq 用名单里第 N 号客户的名字和金额；--open 在浏览器打开
 
-issue 和 remind 默认只预演。真实运行要在命令前加 DRY_RUN=false，例如：
+issue 默认只预演。真实运行要在命令前加 DRY_RUN=false，例如：
   DRY_RUN=false node index.js issue --limit 20
-  DRY_RUN=false node index.js remind --round 1
+
+提醒邮件改用 Shopify Email 发送：发送前先跑 usage（给用过卡的人打 <SENT_TAG>-USED），收件人条件
+  customer_tags CONTAINS '<SENT_TAG>' AND NOT customer_tags CONTAINS '<SENT_TAG>-USED'
 
 测试活动：把 CAMPAIGN_ID、SENT_TAG、TEST_CUSTOMER_IDS 写进 .env.test（见 .env.example），再用
   node --env-file=.env.test index.js <命令>`;
@@ -35,14 +33,13 @@ export const COMMANDS = {
   check: { options: {} },
   select: { options: { refresh: { type: 'boolean' } } },
   issue: { options: { limit: { type: 'string' }, 'retry-failed': { type: 'boolean' }, 'repair-only': { type: 'boolean' } } },
-  remind: { options: { round: { type: 'string' }, limit: { type: 'string' }, 'retry-unknown': { type: 'boolean' }, 'retry-failed': { type: 'boolean' } } },
   usage: { options: {} },
   verify: { options: {} },
   export: { options: { refresh: { type: 'boolean' }, out: { type: 'string' } } },
   preview: { options: { seq: { type: 'string' }, open: { type: 'boolean' } }, positionals: 1 },
 };
 
-export const PREVIEW_VARIANTS = ['first', 'remind1', 'remind2', 'original'];
+export const PREVIEW_VARIANTS = ['first', 'original'];
 
 export class UsageError extends Error {
   constructor(message) {
@@ -86,16 +83,6 @@ export function parseCommand(argv) {
       if (repairOnly && retryFailed) throw new UsageError('--repair-only 和 --retry-failed 不能一起用：--repair-only 只补记和补打 tag，不建卡');
       return { command, limit: values.limit === undefined ? undefined : positiveInt(values.limit, '--limit'), retryFailed, repairOnly };
     }
-    case 'remind':
-      if (values.round === undefined) throw new UsageError('remind 需要 --round 1 或 --round 2');
-      if (!['1', '2'].includes(values.round)) throw new UsageError(`--round 只能是 1 或 2，收到 "${values.round}"`);
-      return {
-        command,
-        round: Number(values.round),
-        limit: values.limit === undefined ? 0 : positiveInt(values.limit, '--limit'),
-        retryUnknown: !!values['retry-unknown'],
-        retryFailed: !!values['retry-failed'],
-      };
     case 'export':
       if (values.out !== undefined && !values.out.trim()) throw new UsageError('--out 后面要写文件路径');
       return { command, refresh: !!values.refresh, out: values.out ?? null };

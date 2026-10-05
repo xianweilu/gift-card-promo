@@ -7,9 +7,9 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { writeReport, englishWorkbookPath, statusLabel, remindLabel } from '../src/report/excel.js';
+import { writeReport, englishWorkbookPath, statusLabel } from '../src/report/excel.js';
 import { TEXT } from '../src/report/text.js';
-import { errorText, summaryText, detailText, issueSkipText, remindSkipText, noteText, storedLabelOf, labelsFor } from '../src/report/labels.js';
+import { errorText, summaryText, detailText, issueSkipText, noteText, storedLabelOf, labelsFor, reminderHelp } from '../src/report/labels.js';
 import { ruleLabelEn, reasonTextEn, notSelectedReasonsEn, formulaEn, channelLabelEn, storedTextEn } from '../src/report/translate-en.js';
 import { RULES } from '../src/select/rules.js';
 import { loadScenarios, setupScenario, snapshotWorkbook, structureOf, cjkCells, CJK } from './report-fixture.js';
@@ -99,9 +99,10 @@ describe('TEXT.en pack', () => {
 
   test('templated texts render English without CJK (sample arguments)', () => {
     const samples = [
-      en.roundTagHelp('T-R1', 'T-R2').flat().join(' '),
+      en.reminderHelp('T', 'T-USED', "customer_tags CONTAINS 'T' AND NOT customer_tags CONTAINS 'T-USED'").flat().join(' '),
       en.timeZone.other('Asia/Shanghai'),
-      en.roundName(2),
+      en.usageReport.usedTag('3', '1', '1') + en.usageReport.usedTag(1, 0, 0),
+      en.summary.usedTagNote('1', '0'),
       en.describeTiers([1077, 1533, 1977]).join(' '),
       en.describeTiers([1000]).join(' '),
       en.usageReport.title('2026-10-12 08:00', 'Los Angeles time'),
@@ -120,16 +121,13 @@ describe('TEXT.en pack', () => {
       en.summary.testTier('$0.10'),
       en.summary.whyCancelled('1') + en.summary.whyTest('1') + en.summary.whyZero('1'),
       en.summary.personCount('1') + en.summary.personCount('2'),
-      en.summary.remindDateChanged(1, 'note'),
-      en.summary.remindNote(en.summary.audienceLive) + en.summary.remindNote(en.summary.audienceTest),
       en.recipients.columns.hasTag.title('TAG') + en.recipients.columns.hasTag.help('TAG'),
-      en.recipients.columns.remind1.help('TAG-R1') + en.recipients.columns.remind2.help('TAG-R2'),
-      en.recipients.remind.sentAt('10-12 09:05') + en.recipients.remind.skippedFor('x') + en.recipients.remind.failedWith('x'),
+      en.recipients.columns.usedTag.help('TAG-USED'),
       en.recipients.notes.reconciledFrom('verify') + en.recipients.notes.amountDiffers('$1', '$2') + en.recipients.notes.bulk(10),
       en.duplicates.activeTitle(3, '1'),
       en.usageDetail.unmatchedTitle('3'),
       en.verify.title('a', 'b', '9', 'T', '7') + en.verify.countItem('x', '1') + en.verify.found('2', 'x') + en.verify.found('2', ''),
-      en.journal.amount('$1') + en.journal.last4('x001') + en.journal.alreadyTagged('T') + en.journal.tagMissing('T') + en.journal.tagRepaired('T'),
+      en.journal.amount('$1') + en.journal.last4('x001') + en.journal.usedTagAdded('T') + en.journal.usedTagFailed('T'),
       en.help.testAmount('$0.10') + en.help.baseText(10) + en.help.neverText(10) + en.help.tierRow(0, 'r').join(' ') + en.help.timeText('tz', 'l') + en.help.exitCode(2),
       en.storeTime('2026-10-04 11:30') + en.withDetail('a', 'b'),
       Object.values(en.shopifyErrors).map((f) => (typeof f === 'function' ? f('x', 'y') : f)).join(' '),
@@ -140,6 +138,8 @@ describe('TEXT.en pack', () => {
     assert.equal(en.summary.personCount('13'), '13 people');
     assert.deepEqual(en.describeTiers([1000]), ['any → $10.00']);
     assert.deepEqual(en.describeTiers([1077, 1533, 1977]), zh.describeTiers([1077, 1533, 1977]));
+    assert.equal(en.usageReport.usedTag('1', '0', '0'), 'Used tag on 1 customer (0 added this run, 0 failed)');
+    assert.equal(en.usageReport.usedTag('3', '1', '1'), 'Used tag on 3 customers (1 added this run, 1 failed)');
   });
 
   test('sheet names, statuses, kinds and marketing states follow the spec wording', () => {
@@ -148,7 +148,11 @@ describe('TEXT.en pack', () => {
     assert.deepEqual(Object.values(en.KIND_LABELS), ['Ordered before', 'Never ordered', 'Test']);
     assert.deepEqual(Object.values(en.MARKETING_LABELS), ['Subscribed', 'Not subscribed', 'Unsubscribed', 'Pending', 'Invalid', 'Redacted', 'No status']);
     assert.equal(en.timeZone.default, 'Los Angeles time');
-    assert.equal(en.REMIND_SENT_BY_TAG, 'Sent (recorded from the round tag in Shopify)');
+    assert.deepEqual(en.OP_LABELS['used.tag.ok'], 'Used tag added');
+    assert.deepEqual(en.OP_LABELS['used.tag.fail'], 'Used tag failed');
+    assert.equal(en.recipients.columns.usedTag.title, 'Used tag');
+    assert.equal(zh.recipients.columns.usedTag.title, '用卡 tag');
+    assert.deepEqual(Object.keys(en.OP_LABELS).filter((k) => k.startsWith('remind.')), [], 'no remind ops any more');
     assert.equal(labelsFor('en'), en);
     assert.equal(labelsFor(en), en);
   });
@@ -165,8 +169,7 @@ describe('TEXT.en pack', () => {
     const written = [
       'recipients', 'totalCents', 'source', 'snapshotReused',
       'attempted', 'created', 'tagged', 'tagFixed', 'reconciled', 'skipped', 'failed', 'rejected', 'unknown', 'amountCents', 'tagFailed', 'reconciledNone', 'stillUnknown', 'newCardsRefused', 'repairOnly', 'stoppedByDate',
-      'eligible', 'planned', 'sent', 'retriedUnknown', 'retriedFailed', 'alreadySent', 'alreadySentByTag', 'previouslyFailed', 'waitingUnknown', 'notIssued', 'roundTagged', 'roundTagFailed', 'roundTagFixed', 'roundTagMissing',
-      'issuedCards', 'usedCards', 'usedCents', 'orders', 'ordersTotalCents', 'giftCardCents', 'customerPaidCents', 'unmatched',
+      'issuedCards', 'usedCards', 'usedCents', 'orders', 'ordersTotalCents', 'giftCardCents', 'customerPaidCents', 'unmatched', 'usedTagged', 'usedTagAdded', 'usedTagFailed',
       'cardCount', 'taggedCount', 'issueCount', 'fixedCount', 'counts',
     ];
     for (const key of written) {
@@ -330,26 +333,18 @@ describe('TEXT.en.stored', () => {
       ['邮箱格式无效', 'invalid email format'],
       ['超过 10 分钟仍查不到这张卡，确认未建成，可以重试', 'Card still not found after 10 minutes: confirmed not created, can be retried'],
       ['超过 1 分钟仍查不到这张卡，确认未建成，可以重试', 'Card still not found after 1 minute: confirmed not created, can be retried'],
-      ['超过 10 分钟仍查不到这张卡，确认未建成；正式活动从 REMIND_1_DATE（2026-10-12）起不再建新卡', 'Card still not found after 10 minutes: confirmed not created; from REMIND_1_DATE (2026-10-12) on the live campaign creates no new cards'],
+      ['超过 10 分钟仍查不到这张卡，确认未建成；礼品卡到期日（2026-10-19）已到，不再建新卡', 'Card still not found after 10 minutes: confirmed not created; the gift card expiry date (2026-10-19) has arrived; no new cards are created'],
       ['超过 90 秒仍查不到这张卡，确认未建成；本次是 --repair-only，不建新卡；之后正常运行 issue 时才会给他建卡', 'Card still not found after 90 seconds: confirmed not created; this run is --repair-only and creates no new cards; a later normal issue run will create it'],
       ['上次运行在建卡途中中断，Shopify 上暂时查不到这张卡', 'The previous run was interrupted while creating this card; Shopify does not show it yet'],
       ['未知错误', 'unknown error'],
       ['查卡也失败了', 'the card lookup failed too'],
-      ['正式活动从 REMIND_1_DATE（2026-10-12）起不再建新卡', 'from REMIND_1_DATE (2026-10-12) on the live campaign creates no new cards'],
+      ['礼品卡到期日（2026-10-19）已到，不再建新卡', 'the gift card expiry date (2026-10-19) has arrived; no new cards are created'],
       ['本次是 --repair-only，不建新卡；之后正常运行 issue 时才会给他建卡', 'this run is --repair-only and creates no new cards; a later normal issue run will create it'],
       // verify.js
       ['verify：开始建卡 10 分钟后仍没在 Shopify 找到这张卡，确认没有建成', 'verify: card not found in Shopify 10 minutes after creation started; confirmed not created'],
       ['卡 9 张，发现 11 条，补记日志 2 条', '9 cards, 11 issues found, 2 journal entries added'],
       ['卡 9 张，没有发现问题', '9 cards, no issues found'],
       ['失败：Network error calling Shopify: fetch failed', 'Failed: Network error calling Shopify: fetch failed'],
-      // remind.js
-      ['上次运行在发送这封提醒时中断，不知道是否已发出', 'The previous run was interrupted while sending this reminder; unknown whether it went out'],
-      ['余额 $5.33 / 面额 $15.33', 'balance $5.33 / face value $15.33'],
-      ['到期日 2026-10-11', 'expiry date 2026-10-11'],
-      ['2 张卡：x042、1043', '2 cards: x042, 1043'],
-      ['3 张卡：a、b、c', '3 cards: a, b, c'],
-      ['Shopify 上这位客户名下没有日志记录的卡 1950', 'Shopify has no card 1950 (the one in the journal) under this customer'],
-      ['customer deleted', 'Customer deleted'],
       // usage.js
       ['回执里没有礼品卡 ID', 'No gift card ID in the receipt'],
       ['回执里没有礼品卡 ID（退款）', 'No gift card ID in the receipt (refund)'],
@@ -360,7 +355,7 @@ describe('TEXT.en.stored', () => {
     ];
     for (const [stored, expected] of cases) assert.equal(S.text(stored), expected, stored);
     // unknown texts come back unchanged (customer data, Shopify's words, newer commands), never throw
-    for (const s of ['这是新的说明', 'fetch failed', '#7001', 'mail.codisto.com', 'already tagged in Shopify', ' spaced ', '']) assert.equal(S.text(s), s);
+    for (const s of ['这是新的说明', 'fetch failed', '#7001', 'mail.codisto.com', 'already tagged in Shopify', ' spaced ', '', '上次运行在发送这封提醒时中断，不知道是否已发出']) assert.equal(S.text(s), s);
     assert.equal(S.text(null), '');
     assert.equal(storedTextEn(undefined), '');
     assert.equal(S.productName('（无名称）'), '(no name)');
@@ -417,9 +412,10 @@ describe('labels.js in English', () => {
       'attempted 9, cards created 3, tagged 4, recorded from Shopify 2, skipped (Ordered after the export 3, Email missing 1), failed 1, refused (can retry) 1, outcome unknown 3, amount $60.00, tag failed 1, seq 1-13',
     );
     assert.equal(summaryText({ dryRun: true, attempted: 1, tagFixed: 1, seqFrom: 9, seqTo: 9 }, { command: 'issue', dryRun: true }, 'en'), 'would create 1, tags added later 1, seq 9');
-    assert.equal(summaryText({ repairOnly: true, reconciledNone: 3, newCardsRefused: 2, stoppedByDate: '2026-10-12' }, { command: 'issue' }, 'en'), 'records and tags only, confirmed not created 3, no new card (still pending) 2, stopped by date 2026-10-12');
-    assert.equal(summaryText({ round: 1, dryRun: true, eligible: 2, planned: 2, alreadySent: 3, roundTagMissing: 1 }, { command: 'remind', dryRun: true }, 'en'), 'eligible 2, would send 2, sent earlier 3, round tag missing 1');
-    assert.equal(summaryText({ round: 1, planned: 6, sent: 2, skipped: { used: 1 }, stopped: 'too-many-failures' }, { command: 'remind', dryRun: false }, 'en'), 'to send 6, sent 2, skipped (Card already used 1), Stopped: too many consecutive send failures');
+    assert.equal(summaryText({ repairOnly: true, reconciledNone: 3, newCardsRefused: 2, stoppedByDate: '2026-10-19' }, { command: 'issue' }, 'en'), 'records and tags only, confirmed not created 3, expiry date reached, no new card (still pending) 2, stopped midway (expiry date reached) 2026-10-19');
+    assert.equal(summaryText({ issuedCards: 9, usedCards: 3, usedCents: 2533, orders: 3, ordersTotalCents: 9700, giftCardCents: 2333, unmatched: 3, usedTagged: 1, usedTagAdded: 1, usedTagFailed: 1 }, { command: 'usage' }, 'en'), 'cards issued 9, cards used 3, used amount $25.33, orders 3, orders total $97.00, paid by gift card $23.33, payments needing review 3, already carrying the used tag 1, used tag added 1, used tag failed 1');
+    // a summary of the removed remind command (older journals): unknown keys as they are, the stop as "stopped: …"
+    assert.equal(summaryText({ round: 1, planned: 6, sent: 2, skipped: { used: 1 }, stopped: 'too-many-failures' }, { command: 'remind', dryRun: false }, 'en'), 'planned 6, sent 2, skipped (used 1), stopped: too-many-failures');
     assert.equal(summaryText({ error: 'GraphQL error: Throttled' }, { command: 'select' }, 'en'), 'error: Shopify query error: Throttled');
     assert.equal(summaryText({ recipients: 13, totalCents: 18993, source: 'bulk', snapshotReused: true }, { command: 'select' }, 'en'), 'selected 13, total $189.93, export method Bulk export of the whole store, reused customer data exported within 24 hours');
     // verify: the Chinese line is ignored, the counters are shown
@@ -442,15 +438,10 @@ describe('labels.js in English', () => {
     assert.equal(issueSkipText('address-ordered-since-snapshot', 'gid://shopify/Customer/12', {}, 'en'), 'Same-address account ordered after the export (customer 12)');
     assert.equal(issueSkipText('not-subscribed', 'NONE', {}, 'en'), 'Not subscribed to marketing emails (No status)');
     assert.equal(issueSkipText('future-reason', 'gid://shopify/Product/5', {}, 'en'), 'future-reason (5)');
-    assert.equal(remindSkipText('used', '余额 $5.33 / 面额 $15.33', {}, 'en'), 'Card already used (balance $5.33 / face value $15.33)');
-    assert.equal(remindSkipText('multiple-cards', '2 张卡：x042、1043', {}, 'en'), 'More than one card (2 cards: x042, 1043)');
-    assert.equal(remindSkipText('card-expired', '到期日 2026-10-11', {}, 'en'), 'Card expired (expiry date 2026-10-11)');
-    assert.equal(remindSkipText('no-card', 'Shopify 上这位客户名下没有日志记录的卡 1950', {}, 'en'), 'No card (Shopify has no card 1950 (the one in the journal) under this customer)');
-    assert.equal(remindSkipText('no-card', undefined, {}, 'en'), 'No card');
+    assert.equal(issueSkipText('customer-deleted', undefined, {}, 'en'), 'Customer deleted');
     assert.equal(detailText('gid://shopify/Order/7', {}, 'en'), 'order 7');
     assert.equal(detailText('gid://shopify/GiftCard/9', {}, 'en'), 'gift card 9');
     assert.equal(noteText('already tagged in Shopify', 'en'), 'Already carries this tag in Shopify');
-    assert.equal(noteText('customer deleted', 'en'), 'Customer deleted');
     assert.equal(noteText('something new', 'en'), 'something new');
     assert.equal(storedLabelOf(en.UNMATCHED_REASON_LABELS, '回执里没有礼品卡 ID（退款）', 'en'), 'No gift card ID in the receipt (refund)');
     assert.equal(storedLabelOf(en.UNMATCHED_REASON_LABELS, 'no-receipt', 'en'), 'No receipt');
@@ -459,19 +450,14 @@ describe('labels.js in English', () => {
     assert.equal(statusLabel('created', null, 'en'), 'Card created, not tagged');
   });
 
-  test('remindLabel: every reminder cell form', () => {
-    const tz = 'America/Los_Angeles';
-    assert.equal(remindLabel({ status: 'sent', at: '2026-10-12T16:05:00Z' }, null, tz, 'en'), 'Sent 10-12 09:05');
-    assert.equal(remindLabel({ status: 'sent', at: '2026-10-12T16:05:00Z', tagError: 'x' }, null, tz, 'en'), 'Sent 10-12 09:05; round tag missing, the next run adds it');
-    assert.equal(remindLabel({ status: 'sent', source: 'tag' }, null, tz, 'en'), 'Sent (recorded from the round tag in Shopify)');
-    assert.equal(remindLabel({ status: 'sent' }, null, tz, 'en'), 'Sent');
-    assert.equal(remindLabel({ status: 'skipped', reason: 'used' }, null, tz, 'en'), 'Skipped: Card already used');
-    assert.equal(remindLabel({ status: 'skipped' }, null, tz, 'en'), 'Skipped');
-    assert.equal(remindLabel({ status: 'failed', error: 'giftCardSendNotificationToCustomer rejected: input: Customer has no email [INVALID]' }, null, tz, 'en'), 'Failed: Shopify refused: input: Customer has no email (INVALID)');
-    assert.equal(remindLabel({ status: 'failed' }, null, tz, 'en'), 'Failed');
-    assert.equal(remindLabel({ status: 'unknown' }, null, tz, 'en'), 'Outcome unknown');
-    assert.equal(remindLabel({ status: 'in_progress' }, 'remind', tz, 'en'), 'In progress');
-    assert.equal(remindLabel({ status: 'in_progress' }, null, tz, 'en'), 'Outcome unknown');
+  test('reminderHelp: the Shopify Email section in English, with the campaign\'s tags', () => {
+    const rows = reminderHelp('OCT26RTPROMO', 'en');
+    assert.deepEqual(rows.map(([item]) => item), ['How reminders are sent', 'Recipient condition', 'Used tag']);
+    assert.equal(rows[1][1], "customer_tags CONTAINS 'OCT26RTPROMO' AND NOT customer_tags CONTAINS 'OCT26RTPROMO-USED'");
+    assert.match(rows[0][1], /^The program no longer sends reminder emails; they go out with Shopify Email\. Before a reminder, run usage once so that everyone who used their card carries OCT26RTPROMO-USED;/);
+    assert.match(rows[2][1], /^OCT26RTPROMO-USED: every usage run \(DRY_RUN does not matter\)/);
+    for (const [item, text] of rows) assert.doesNotMatch(`${item} ${text}`, CJK);
+    assert.deepEqual(reminderHelp('OCT26RTPROMO').map(([item]) => item), ['怎么发', '收件人条件', '用卡 tag']);
   });
 });
 
@@ -491,31 +477,27 @@ describe('English workbook', () => {
     });
   }
 
-  test('live: Recipients headers, statuses, reminder cells, formulas and notes', async () => {
+  test('live: Recipients headers, statuses, the used tag, formulas and notes', async () => {
     const { en: sheets } = await writeScenario(live);
     const R = sheetNamed(sheets, 'Recipients');
     assert.deepEqual(rowValues(R, 1), [
       'Seq', 'Status', 'Batch', 'Customer ID', 'Name', 'Email', 'Marketing', 'Customer type', 'Last valid order', 'Last order date',
       'Latest order channel', 'Days ago', 'Last order total', 'Amount formula', 'Tier', 'Gift card amount', 'Accounts at address', 'Other accounts at address',
-      'Has gift-card-sent-2026-10', 'Gift card ID', 'Card last 4', 'Card created', 'Tagged', 'Reminder 1', 'Reminder 2',
-      'Used amount', 'Balance', 'Orders using the card', 'Notes/errors', 'City', 'State', 'ZIP', 'Orders', 'Total spent', 'Signed up',
+      'Has gift-card-sent-2026-10', 'Gift card ID', 'Card last 4', 'Card created', 'Tagged',
+      'Used amount', 'Balance', 'Orders using the card', 'Used tag', 'Notes/errors', 'City', 'State', 'ZIP', 'Orders', 'Total spent', 'Signed up',
     ]);
     const COL = Object.fromEntries(rowValues(R, 1).map((h, i) => [h, i]));
     const bySeq = new Map(allRows(R).slice(1).map((r) => [r[COL.Seq], r]));
     const col = (seq, name) => bySeq.get(seq)[COL[name]];
     assert.deepEqual([...bySeq.values()].map((r) => r[COL.Status]), [
-      'Done', 'Done', 'Done', 'Done', 'Card created, not tagged', 'Failed', 'Done', 'Skipped before issuing', 'Needs review', 'Pending', 'Needs review', 'Done', 'Skipped before issuing',
+      'Done', 'Done', 'Done', 'Done', 'Card created, not tagged', 'Failed', 'Done', 'Skipped before issuing', 'In progress', 'Pending', 'Needs review', 'Done', 'Skipped before issuing',
     ]);
-    assert.equal(col(2, 'Reminder 1'), 'Sent 10-12 09:05');
-    assert.equal(col(2, 'Reminder 2'), 'In progress');
-    assert.equal(col(12, 'Reminder 1'), 'Sent (recorded from the round tag in Shopify)');
-    assert.equal(col(12, 'Reminder 2'), 'Sent 10-16 09:00; round tag missing, the next run adds it');
-    assert.equal(col(5, 'Reminder 1'), 'Skipped: Card already used');
-    assert.equal(col(5, 'Reminder 2'), 'Failed');
-    assert.equal(col(7, 'Reminder 1'), 'Failed: Shopify refused: input: Customer has no email (INVALID)');
-    assert.equal(col(7, 'Reminder 2'), 'Skipped: Not subscribed to marketing emails');
-    assert.equal(col(1, 'Reminder 1'), 'Outcome unknown');
-    assert.equal(col(6, 'Reminder 2'), 'Skipped');
+    // c1 (seq 2) and c2 (seq 5): used.tag.ok in the journal; c14 (seq 7): usage.json only; c8 (seq 13): used.tag.fail
+    assert.equal(col(2, 'Used tag'), 'Yes');
+    assert.equal(col(5, 'Used tag'), 'Yes');
+    assert.equal(col(7, 'Used tag'), 'Yes');
+    assert.equal(col(13, 'Used tag'), 'No');
+    assert.equal(col(1, 'Used tag'), 'No');
     assert.equal(col(2, 'Amount formula'), '10% × $150.00 = $15.00 → tier $15.33');
     assert.equal(col(11, 'Amount formula'), '10% × average $125.92 = $12.59 → tier $15.33');
     assert.equal(col(2, 'Latest order channel'), 'Online Store (web)');
@@ -531,7 +513,7 @@ describe('English workbook', () => {
     assert.equal(col(6, 'Notes/errors'), 'Shopify refused: input: Customer is invalid (INVALID); input.expiresOn: must be in the future (GREATER_THAN)');
     assert.equal(col(7, 'Notes/errors'), 'Card amount $15.33 differs from the list amount $10.77');
     assert.equal(col(8, 'Notes/errors'), 'Ordered after the export; Latest order is $0, based on an earlier paid order');
-    assert.equal(col(9, 'Notes/errors'), 'The card request was sent but no outcome was recorded (the run was interrupted), the next issue run first looks for the card in Shopify; Latest order cancelled, based on an earlier paid order');
+    assert.equal(col(9, 'Notes/errors'), 'Latest order cancelled, based on an earlier paid order', 'issue is running in this scenario: the row is in progress, not interrupted');
     assert.equal(col(10, 'Notes/errors'), 'verify: card not found in Shopify 10 minutes after creation started; confirmed not created; Latest order is a test order, based on an earlier paid order');
     assert.equal(col(11, 'Notes/errors'), 'Network error: fetch failed; the card lookup failed too: Shopify query error: Internal error');
     assert.equal(col(12, 'Notes/errors'), 'Card found in Shopify (verify) and recorded; 10 accounts at this address, suspected bulk sign-ups');
@@ -591,27 +573,30 @@ describe('English workbook', () => {
     const S = sheetNamed(sheets, 'Summary');
     const texts = textsOf(S);
     for (const expected of [
-      'Campaign parameters', 'Selection funnel', 'Same-address dedupe', 'Amounts', 'Issuing progress', 'Reminders', 'Usage', 'Run history',
+      'Campaign parameters', 'Selection funnel', 'Same-address dedupe', 'Amounts', 'Issuing progress', 'Usage', 'Run history',
       '1. No email or invalid email format', '4. Account younger than 7 days', '7. Ordered in the last 3 months', '8. Same-address account ordered in the last 3 months', '12. Customer deleted at the order follow-up',
       'counted only', 'listed row by row', 'Rule 9: by channel', 'Online Store (web)', 'New checkout', 'Amazon', 'Sellbrite', 'Rule 3: by marketing status', 'Unsubscribed', 'No status', '(empty)',
-      'Reminder 1', 'Reminder 2', 'gift-card-sent-2026-10-R1', 'Card already used', 'More than one card', 'reason not recorded',
+      'Used tag (customers)', '1 added this run, 1 failed', 'reason not recorded',
       'Pending', 'In progress', 'Needs review', 'Card created, not tagged', 'Done', 'Failed', 'Skipped before issuing', 'Ordered after the export',
       'Bulk export of the whole store, 42 customers', 'Live campaign: selected by the rules', '≤ $10.77 → $10.77; $10.78–$15.33 → $15.33; ≥ $15.34 → $19.77',
-      '10 people', '3 people', '1 person', 'Gold Balloon × 20; Helium Tank × 19; (no name) × 18', 'See the "Usage report" sheet', 'live', 'dry run', 'running', 'did not end normally (possibly interrupted)',
-      'Interrupted (Ctrl+C)', 'all counters are 0',
+      '10 people', '3 people', '1 person', 'Gold Balloon × 20; Helium Tank × 19; (no name) × 18', 'See the "Usage report" sheet', 'live', 'dry run', 'running',
+      'all counters are 0',
     ]) assert.ok(texts.includes(expected), `Summary has "${expected}"`);
+    for (const gone of ['Reminders', 'Reminder 1', 'Reminder 2', 'Round tag']) assert.ok(!texts.includes(gone), `Summary has no "${gone}"`);
+    assert.deepEqual(rowValues(S, allRows(S).findIndex((r) => r[0] === 'Started') + 1), ['Started', 'Command', 'Dry run/live', 'Batch', 'Limit', 'Exit code', 'Ended', 'Summary']);
     assert.ok(texts.some((t) => t.startsWith('Campaign 2026-10 · live campaign · generated 2026-10-12 10:00 (Los Angeles time)')));
     assert.ok(texts.includes('attempted 9, cards created 3, tagged 4, recorded from Shopify 2, skipped (Ordered after the export 3, Email missing 1), failed 1, refused (can retry) 1, outcome unknown 3, amount $60.00, tag failed 1, seq 1-13'));
-    assert.ok(texts.includes('records and tags only, tags added later 2, recorded from Shopify 2, confirmed not created 3, no new card (still pending) 2, stopped by date 2026-10-12'));
+    assert.ok(texts.includes('records and tags only, tags added later 2, recorded from Shopify 2, confirmed not created 3, expiry date reached, no new card (still pending) 2, stopped midway (expiry date reached) 2026-10-19'));
+    assert.ok(texts.includes('cards issued 9, cards used 3, used amount $25.33, orders 3, orders total $97.00, paid by gift card $23.33, payments needing review 3, already carrying the used tag 1, used tag added 1, used tag failed 1'));
     assert.ok(texts.some((t) => t.startsWith('cards 9, tagged customers 7, issues 11, journal entries added 2, by type (Card without the tag 1, Still needs review 1)')));
     assert.ok(texts.some((t) => t.startsWith('error: Network error: fetch failed')));
-    assert.ok(texts.includes('2026-10-12 when the list was generated, now 2026-10-13 per .env'));
+    assert.ok(texts.some((t) => t.startsWith('The card still works on the expiry date itself. Note: GIFT_CARD_EXPIRES_ON in .env is now 2026-10-20')));
   });
 
   test('live: Activity log shows every journal note, detail and error in English', async () => {
     const { en: sheets } = await writeScenario(live);
     const J = sheetNamed(sheets, 'Activity log');
-    assert.deepEqual(rowValues(J, 1), ['Time', 'Command', 'Batch/round', 'Customer ID', 'Action', 'Result/notes', 'Gift card ID', 'Error']);
+    assert.deepEqual(rowValues(J, 1), ['Time', 'Command', 'Batch', 'Customer ID', 'Action', 'Result/notes', 'Gift card ID', 'Error']);
     const rows = allRows(J).slice(1);
     const of = (cid, action) => rows.filter((r) => r[3] === cid && (!action || r[4] === action));
     const results = rows.map((r) => r[5]).filter(Boolean);
@@ -621,7 +606,7 @@ describe('English workbook', () => {
     assert.ok(actions.has('future.op'), 'an unknown op shows its code');
     for (const expected of [
       'Card still not found after 10 minutes: confirmed not created, can be retried',
-      'Card still not found after 10 minutes: confirmed not created; from REMIND_1_DATE (2026-10-12) on the live campaign creates no new cards',
+      'Card still not found after 10 minutes: confirmed not created; the gift card expiry date (2026-10-19) has arrived; no new cards are created',
       'Card still not found after 90 seconds: confirmed not created; this run is --repair-only and creates no new cards; a later normal issue run will create it',
       'verify: card not found in Shopify 10 minutes after creation started; confirmed not created',
       'Email missing (invalid email format)',
@@ -632,18 +617,9 @@ describe('English workbook', () => {
       'Not subscribed to marketing emails (Unsubscribed)',
       'Not subscribed to marketing emails (No status)',
       'future-reason (5)',
-      'Card already used (balance $5.33 / face value $15.33)',
-      'More than one card (2 cards: x042, 1043)',
-      'No card (Shopify has no card 1950 (the one in the journal) under this customer)',
-      'Card expired (expiry date 2026-10-11)',
-      'No email (c953@example.org)',
       'Already carries this tag in Shopify',
-      'Already carries gift-card-sent-2026-10-R1 in Shopify',
-      'Already carries the round tag in Shopify',
-      'gift-card-sent-2026-10-R1 not added; the next run adds it',
-      'gift-card-sent-2026-10-R1 added',
-      'Customer deleted',
-      'Resent (had failed or outcome unknown)',
+      'gift-card-sent-2026-10-USED added',
+      'gift-card-sent-2026-10-USED not added; the next usage run tries again',
       'amount $15.33, card last 4 x001',
       'check right after the unknown outcome, amount $15.33, card last 4 x042',
       'pre-flight check, amount $15.33, card last 4 x041',
@@ -652,24 +628,26 @@ describe('English workbook', () => {
     for (const expected of [
       'Network error: fetch failed; the card lookup failed too: Shopify query error: Internal error',
       'The previous run was interrupted while creating this card; Shopify does not show it yet',
-      'The previous run was interrupted while sending this reminder; unknown whether it went out',
       'Shopify refused: input: Customer is invalid (INVALID); input.expiresOn: must be in the future (GREATER_THAN)',
+      'Shopify refused: tags: Tag limit reached (INVALID)',
       'Shopify rate limit: refused 6 times in a row, gave up',
       'Shopify returned HTTP 502',
-      'Shopify returned HTTP 503: Service Unavailable',
       'Shopify returned no result',
       'Shopify returned an unreadable response',
       'Shopify returned no data',
     ]) assert.ok(errors.includes(expected), `error "${expected}"`);
-    assert.equal(of('964', 'Round tag added')[0][5], 'Customer deleted');
-    assert.deepEqual(rows.filter((r) => r[2]).map((r) => r[2]).filter((b) => /^Reminder/.test(b)).every((b) => b === 'Reminder 1' || b === 'Reminder 2'), true);
+    assert.deepEqual(of('2', 'Used tag failed')[0].slice(5), ['gift-card-sent-2026-10-USED not added; the next usage run tries again', '1002', 'Shopify refused: tags: Tag limit reached (INVALID)']);
+    assert.deepEqual(of('2', 'Used tag added')[0].slice(1, 3), ['usage', null]);
+    assert.equal(of('983', 'Used tag added')[0][1], 'usage', 'an entry without its run.start: the command comes from the op');
+    assert.ok(rows.every((r) => !/^(remind|used)\./.test(r[4])), 'every op has an English label');
   });
 
   test('live: Usage report, Usage details and Verify', async () => {
     const { en: sheets } = await writeScenario(live);
     const U = sheetNamed(sheets, 'Usage report');
     assert.equal(rowValues(U, 1)[0], 'Usage report (as of 2026-10-12 08:00, Los Angeles time)');
-    assert.deepEqual(rowValues(U, 9), ['By tier', 'Issued', 'Used', 'Usage rate', 'Used amount']);
+    assert.equal(rowValues(U, 8)[0], 'Used tag on 3 customers (1 added this run, 1 failed)');
+    assert.deepEqual(rowValues(U, 10), ['By tier', 'Issued', 'Used', 'Usage rate', 'Used amount']);
     assert.ok(textsOf(U).includes('(no name)'));
     assert.deepEqual(textsOf(U).filter((t) => ['Ordered before', 'Never ordered', 'Test', 'mystery'].includes(t)), ['Ordered before', 'Never ordered', 'Test', 'mystery']);
     const D = sheetNamed(sheets, 'Usage details');
@@ -689,18 +667,18 @@ describe('English workbook', () => {
     assert.deepEqual(issueRows[0].slice(3), ['Done: card x014, tagged 2026-10-05 09:06', 'Not among this campaign\'s cards', 'Check the customer in the admin'], 'the *En fields are shown');
   });
 
-  test('live: Help explains the sheets, columns, statuses, reminder cells and round tags in English', async () => {
+  test('live: Help explains the sheets, columns, statuses, the Shopify Email reminders and the used tag in English', async () => {
     const { en: sheets } = await writeScenario(live);
     const H = sheetNamed(sheets, 'Help');
     const texts = textsOf(H);
     assert.deepEqual(rowValues(H, 1), ['Item', 'Explanation']);
     for (const name of Object.values(en.sheets)) assert.ok(texts.includes(name), `Help lists the "${name}" sheet`);
     for (const status of Object.values(en.STATUS_LABELS)) assert.ok(texts.includes(status));
-    for (const [item] of en.REMIND_HELP) assert.ok(texts.includes(item));
-    for (const expected of ['Recipients columns', 'Has gift-card-sent-2026-10', 'Notes/errors', 'Round tag (at most one reminder per person per round)', 'Adding a missing round tag', 'Amount rules', 'Tier 1', 'base ≤ $10.77 → $10.77', 'Exit code 130', 'Read-only', 'Filtering']) {
+    for (const expected of ['Recipients columns', 'Has gift-card-sent-2026-10', 'Used tag', 'Notes/errors', 'Reminder emails (Shopify Email)', 'How reminders are sent', 'Recipient condition', "customer_tags CONTAINS 'gift-card-sent-2026-10' AND NOT customer_tags CONTAINS 'gift-card-sent-2026-10-USED'", 'Reasons people are skipped before issuing', 'Amount rules', 'Tier 1', 'base ≤ $10.77 → $10.77', 'Exit code 130', 'Read-only', 'Filtering']) {
       assert.ok(texts.includes(expected), `Help has "${expected}"`);
     }
-    assert.ok(texts.some((t) => t.includes('gift-card-sent-2026-10-R1') && t.includes('gift-card-sent-2026-10-R2')));
+    assert.ok(texts.some((t) => t.startsWith('gift-card-sent-2026-10-USED: every usage run (DRY_RUN does not matter)')));
+    assert.ok(texts.every((t) => !/\bremind\b|Round tag|-R[12]\b|REMIND_\d_DATE/.test(t)), 'no text of the removed remind command');
     assert.ok(texts.includes('All times are in the store\'s time zone (America/Los_Angeles, Los Angeles time).'));
   });
 

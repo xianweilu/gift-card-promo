@@ -7,49 +7,47 @@
   way (issued by hand in the admin, bought in the store) have no suffix and get
   the original email unchanged.
 
-  The promo version has three stages, chosen by the date the email is sent:
-    before REMIND_1_DATE            → first email (sent when the card is created)
-    REMIND_1_DATE .. REMIND_2_DATE  → first reminder
-    REMIND_2_DATE and later         → second (last) reminder
-  Reminders are re-sends of this same notification (giftCardSendNotificationToCustomer).
+  Reminders are sent separately with Shopify Email, so this template has one promo
+  copy only. Every date in it comes from the card's expiry (gift_card.expires_on).
 
   The suffix must match in three places: .env, the notification templates
   (subject + this body) and the theme's templates/gift_card.gift-card-promo.liquid.
 {%- endcomment -%}
-{%- comment -%} ===== 活动日期：由 node index.js preview 按 .env 自动更新，请勿手改 ===== {%- endcomment -%}
-{%- assign promo_remind_1 = 20261012 -%}
-{%- assign promo_remind_2 = 20261016 -%}
-{%- comment -%} ===== 活动日期结束 ===== {%- endcomment -%}
 {%- assign promo_suffix = 'gift-card-promo' -%}
 {%- assign is_promo = false -%}
 {%- if gift_card.template_suffix == promo_suffix -%}{%- assign is_promo = true -%}{%- endif -%}
-{%- assign promo_today = 'now' | date: '%Y%m%d' | plus: 0 -%}
-{%- assign promo_stage = 'first' -%}
-{%- if promo_today >= promo_remind_2 -%}{%- assign promo_stage = 'remind2' -%}{%- elsif promo_today >= promo_remind_1 -%}{%- assign promo_stage = 'remind1' -%}{%- endif -%}
-{%- assign promo_valid_through = '' -%}
-{%- if gift_card.expires_on -%}{%- capture promo_valid_through -%}{{ gift_card.expires_on | date: '%B %-d, %Y' }}{%- endcapture -%}{%- endif -%}
-{%- capture promo_legal -%}{%- if promo_valid_through != '' -%}<p style="font-size: 14px; font-weight: bold; letter-spacing: 1px; text-transform: uppercase; margin: 0 0 16px 0;">PROMOTIONAL GIFT CARD · VALID THROUGH {{ promo_valid_through | upcase }}</p>{%- endif -%}{%- endcapture -%}
+{%- assign promo_long_date = '' -%}{%- assign promo_short_date = '' -%}
+{%- if gift_card.expires_on -%}
+{%- capture promo_long_date -%}{{ gift_card.expires_on | date: '%B %-d, %Y' }}{%- endcapture -%}
+{%- capture promo_short_date -%}{{ gift_card.expires_on | date: '%-m/%-d/%Y' }}{%- endcapture -%}
+{%- endif -%}
+{%- assign promo_name = '' -%}
+{%- if gift_card.customer and gift_card.customer.first_name != blank -%}{%- assign promo_name = gift_card.customer.first_name -%}{%- endif -%}
 
 {% if is_promo %}
-{% if promo_stage == 'remind2' %}
-{% capture email_title %}Last chance to use your credit{% endcapture %}
-{% capture email_body %}<center>{{ promo_legal }}Hi{% if gift_card.customer %} {{ gift_card.customer.first_name }}{% endif %}, this is your final reminder: your exclusive Online Credit Code{% if promo_valid_through != '' %} can be used through {{ promo_valid_through }}{% endif %}.<br><br>Don't let it go to waste. Tap the button below to reveal it and use it on your next order.<br><br>Treat this code like cash and save this email for future reference.</center>{% endcapture %}
-{% capture button_text %}Use your Online Credit Code{% endcapture %}
-{% elsif promo_stage == 'remind1' %}
-{% capture email_title %}Your surprise is still waiting{% endcapture %}
-{% capture email_body %}<center>{{ promo_legal }}Hi{% if gift_card.customer %} {{ gift_card.customer.first_name }}{% endif %}, your exclusive Online Credit Code from {{ shop.name }} hasn't been used yet.<br><br>{% if promo_valid_through != '' %}It's valid through {{ promo_valid_through }}. {% endif %}Tap the button below to reveal it and treat yourself.<br><br>Treat this code like cash and save this email for future reference.</center>{% endcapture %}
-{% capture button_text %}Reveal your Online Credit Code{% endcapture %}
-{% else %}
-{% capture email_title %}A little surprise, just for you{% endcapture %}
-{% capture email_body %}<center>{{ promo_legal }}Hi{% if gift_card.customer %} {{ gift_card.customer.first_name }}{% endif %}, we've set aside an exclusive Online Credit Code with your name on it, as a thank-you for being part of the {{ shop.name }} family.<br><br>How much is it worth? Tap the button below to reveal your code and find out.<br><br>{% if promo_valid_through != '' %}Your code is valid through {{ promo_valid_through }}. {% endif %}Treat this code like cash and save this email for future reference.</center>{% endcapture %}
-{% capture button_text %}Reveal your Online Credit Code{% endcapture %}
-{% endif %}
+{% capture email_title %}{% endcapture %}
+{% capture email_body %}<p>Hello{% if promo_name != '' %} {{ promo_name }}{% endif %},</p>
+<p>We did some "Balloon Math" and found some funds for you!</p>
+<p>Don't let your money go to waste!<br>
+You have an <strong>unused credit</strong> at <strong>LA Balloons</strong> waiting for you!<br>
+It’s yours to use at <a href="{{ shop.url }}">LABalloons.com</a>{% if promo_long_date != '' %}, but you must use it or lose it by <strong>{{ promo_long_date }}</strong>{% endif %}.</p>
+<p>Click below to claim your credit code before it's gone:</p>{% endcapture %}
+{% capture button_text %}Claim My Credit Now{% endcapture %}
+{% capture email_after %}<p style="font-size: 12px;">** Promotional reward only. No cash value. Not redeemable for cash, non-transferable, valid only at <a href="{{ shop.url }}">laballoons.com</a>{% if promo_short_date != '' %} &amp; expires {{ promo_short_date }}{% endif %}. **</p>
+<p>No strings attached!<br>
+Shop now and apply your code before it’s too late!</p>
+<p>We appreciate your business, and thank you for trusting us with your balloon and party supply needs!<br>
+Your support means the world to our team.</p>
+<p>- LA Balloons</p>
+<p style="font-size: 12px;"><strong>** Terms &amp; Conditions:</strong><br>
+This voucher is distributed entirely for free as part of a temporary marketing promotion; no monetary value or thing of value was paid in exchange for it. Valid only for merchandise online at <a href="{{ shop.url }}">www.laballoons.com</a>. This code cannot be redeemed for cash, and is explicitly exempt from California’s mandatory gift certificate cash-out regulations. Lost, deleted, or stolen promotional codes will not be replaced.{% if promo_short_date != '' %} Expires on {{ promo_short_date }}.{% endif %}</p>{% endcapture %}
 {% else %}
 {% capture email_title %}Your Online Credit Code is now available! {% endcapture %}
 {% capture email_body %}<center>Hi{% if gift_card.customer %} {{ gift_card.customer.first_name }}{% endif %}, here is your {{ gift_card.balance | money_without_trailing_zeros }} online credit code.<br><br>Treat this code like cash and save this email for future reference.</center>{% endcapture %}
 {% capture button_text %}View your Online Credit Code{% endcapture %}
+{% capture email_after %}{% endcapture %}
 {% endif %}
-<!-- promo-stage: {% if is_promo %}{{ promo_stage }}{% else %}original{% endif %} -->
+<!-- promo-stage: {% if is_promo %}promo{% else %}original{% endif %} -->
 
 <!DOCTYPE html>
 <html lang="en">
@@ -90,7 +88,7 @@
                   </td>
 
  <tr><td><center>
-                            <br><h2>{{ email_title }}</h2></td></tr>
+                            {% if email_title != blank %}<br><h2>{{ email_title }}</h2>{% endif %}</td></tr>
                     <td class="order-number__cell"><center>
                       <span class="order-number__text">
                         {{ order_name }}</center>
@@ -117,7 +115,7 @@
             <td>
 
 
-            <p>{{ email_body }}</p>
+            {% if is_promo %}<div style="text-align: left;">{{ email_body }}</div>{% else %}<p>{{ email_body }}</p>{% endif %}
             {%- comment -%}
               Shopify's notification stylesheet floats .main-action-cell to the left.
               align="center" plus the inline styles override that so the button and
@@ -143,6 +141,8 @@
   </tr>
 </table>
 
+
+            {% if email_after != blank %}<div style="text-align: left;">{{ email_after }}</div>{% endif %}
 
             {% if gift_card.pass_url %}
               <a href="{{ gift_card.pass_url }}" class="apple-wallet-button">

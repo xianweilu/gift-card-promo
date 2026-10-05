@@ -26,8 +26,7 @@ export function selectionParams(config, { timezone, cutoffMs, cutoffIso }) {
     giftCardTemplateSuffix: config.giftCardTemplateSuffix,
     giftCardExpiresOn: config.giftCardExpiresOn,
     launchDate: config.launchDate,
-    remind1Date: config.remind1Date,
-    remind2Date: config.remind2Date,
+    // Older selection.json files may also carry remind1Date / remind2Date; nothing reads them.
     testGiftAmountCents: config.testCustomerIds.length ? config.testGiftAmountCents : null,
   };
 }

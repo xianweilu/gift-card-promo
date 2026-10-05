@@ -22,15 +22,16 @@
 // to Shopify and only run.start/run.end to the journal; every state change is
 // simulated in memory so the preview shows exactly what a real run would do.
 //
-// Dates: the notification template picks its copy by the day it is sent, so a
-// real run of the real campaign creates cards from LAUNCH_DATE until the day
-// before REMIND_1_DATE (from then on the creation email would show reminder
-// copy). The store's date is checked when the run starts and again right
-// before every card, so a run that crosses midnight into REMIND_1_DATE stops
-// there. From REMIND_1_DATE on, a run (and its dry run, which follows the same
-// rule) only does the repairs that send nothing: settling open outcomes,
-// adding missing tags, recording cards Shopify already has. Test campaigns are
-// not date-gated; a dry run before LAUNCH_DATE only warns.
+// Dates: a real run of the real campaign creates cards from LAUNCH_DATE on
+// (test campaigns any day). No card is created on or after the cards' expiry
+// date (selection.params.giftCardExpiresOn, the date every card is created
+// with): a card made that day could not be used any more. The store's date is
+// checked when the run starts and again right before every card, so a run that
+// crosses midnight into the expiry date stops there. From the expiry date on, a
+// run (and its dry run, which follows the same rule) only does the repairs that
+// send nothing: settling open outcomes, adding missing tags, recording cards
+// Shopify already has. The expiry rule applies to test campaigns too; a dry run
+// before LAUNCH_DATE only warns.
 //
 // --repair-only does those repairs on any day and never creates a card (no
 // --limit needed): for a campaign that is being given up.
@@ -75,15 +76,15 @@ export const SKIP_REASONS = Object.freeze({
 
 export const SELECTION_REPLACED = '名单刚被 select 改写，请重新运行';
 
-/** Refusal (real run) / warning (dry run) on or after REMIND_1_DATE. */
-function tooLateText(remind1Date) {
-  return `正式活动要在 REMIND_1_DATE（${remind1Date}）之前建卡：今天建卡时 Shopify 发出的首封邮件会显示提醒的文案。`
-    + '确需补发，请先改 .env 的提醒日期、运行 node index.js preview，并把模板重新贴到 Shopify 后台。';
+/** Refusal (real run) / warning (dry run) on or after the cards' expiry date. */
+function tooLateText(expiresOn) {
+  return `礼品卡到期日（${expiresOn}）已到，不再建新卡：现在建的卡客户已经用不了。`
+    + '确需补发，请改 .env 的 GIFT_CARD_EXPIRES_ON，换一个新的 CAMPAIGN_ID 重新运行 select。';
 }
 
 /** Said instead of "will be issued again" when a row settled as not created can no longer get a card. */
-function noNewCardsText(remind1Date) {
-  return `正式活动从 REMIND_1_DATE（${remind1Date}）起不再建新卡`;
+function noNewCardsText(expiresOn) {
+  return `礼品卡到期日（${expiresOn}）已到，不再建新卡`;
 }
 
 /** Said instead of "will be issued again" in an `issue --repair-only` run (a later normal run does issue it). */
@@ -98,30 +99,19 @@ function tagRetryText(n) {
   return `有 ${n} 人补打 tag 失败，下次运行会再试`;
 }
 
-/**
- * True when the real campaign creates no new card on the store-local `date`
- * (YYYY-MM-DD): from REMIND_1_DATE on, the creation email would show reminder copy.
- * Test campaigns are never date-gated.
- */
-function newCardsBlockedOn(config, selection, date) {
-  return selection.mode !== 'test' && Boolean(config.remind1Date) && date >= config.remind1Date;
+/** The expiry date the cards of this list are created with ('' when they never expire). */
+function cardExpiry(selection) {
+  return selection.params?.giftCardExpiresOn || '';
 }
 
-/** Chinese names of the template's copies (the same words as src/preview.js uses). */
-const STAGE_LABELS = Object.freeze({ first: '首封', remind1: '第一次提醒', remind2: '第二次提醒' });
-
 /**
- * The copy the "Gift card created" template shows in a first email sent on
- * `date` (YYYY-MM-DD), by .env's reminder dates: 'first' | 'remind1' | 'remind2'.
- * The rule of preview.expectedStage(config, 'first', date), kept here so that
- * issue does not load the template engine (without both reminder dates the
- * first email's own copy is assumed, as there).
+ * True when no new card is created on the store-local `date` (YYYY-MM-DD): the
+ * cards' expiry date has come. Applies to test campaigns too (an expired card is
+ * of no use to anyone). Lists without an expiry date are never blocked.
  */
-export function firstEmailStageOn(config, date) {
-  if (!config.remind1Date || !config.remind2Date) return 'first';
-  if (date >= config.remind2Date) return 'remind2';
-  if (date >= config.remind1Date) return 'remind1';
-  return 'first';
+export function newCardsBlockedOn(selection, date) {
+  const expiresOn = cardExpiry(selection);
+  return Boolean(expiresOn) && date >= expiresOn;
 }
 
 // Lazy imports: exceljs is heavy, and preview.js is optional for this command.
@@ -212,10 +202,9 @@ export async function runIssue({
   }
   const tz = selection.params.timezone;
 
-  // 3. Date guards, for the real campaign only: test campaigns may run any day.
-  //    LAUNCH_DATE refuses real runs that may create cards; dry runs and repair-only runs (which
-  //    send nothing) may run before it. From REMIND_1_DATE on, the creation email Shopify sends
-  //    would show the reminder copy, so no NEW card is created, in a real run or its dry run;
+  // 3. Date guards. LAUNCH_DATE (real campaign only; test campaigns may run any day) refuses real
+  //    runs that may create cards; dry runs and repair-only runs (which send nothing) may run before
+  //    it. From the cards' expiry date on, no NEW card is created, in a real run or its dry run;
   //    repairs that send nothing (settling leftovers, adding missing tags, recording cards Shopify
   //    already has) still run. walk() checks the date again before every card.
   const startMs = now().getTime();
@@ -224,7 +213,7 @@ export async function runIssue({
     log.error(`正式活动要到 ${config.launchDate}（店铺时间）才能建卡发信。现在是店铺时间 ${localDateTime(startMs, tz)}；测试活动不受这个限制`);
     return done(2);
   }
-  const dateBlocked = newCardsBlockedOn(config, selection, today);
+  const dateBlocked = newCardsBlockedOn(selection, today);
   warnConfigDrift(config, selection, log);
 
   // 4. One write command at a time (dry runs too: they must see a journal nobody else is changing).
@@ -316,8 +305,9 @@ class IssueRun {
     this.sentTagLower = o.config.sentTag.toLowerCase();
     // Test campaigns skip the audience rules at select time; the pre-flight does too.
     this.audienceRules = o.selection.mode !== 'test';
-    // No new card in this run: REMIND_1_DATE has come (dateBlocked), or --repair-only.
+    // No new card in this run: the cards' expiry date has come (dateBlocked), or --repair-only.
     this.noNewCards = !!(o.dateBlocked || o.repairOnly);
+    this.expiresOn = cardExpiry(o.selection);
     this.local = new Map(); // customer gid → status set (or, in a dry run, simulated) by this run
     this.wouldCreate = []; // dry run: who would get a card, in order
     this.skippedRows = []; // { r, reason, detail }
@@ -345,14 +335,14 @@ class IssueRun {
   /**
    * No new card in this run; the repairs above are done.
    *  - --repair-only: exit 0, or 1 when a missing tag could not be added.
-   *  - On or after REMIND_1_DATE (the creation email would show the reminder copy): a real run
-   *    exits 2 while someone is still waiting for a card, 1 when only tag repairs failed;
-   *    its dry run says the same as a warning and exits 0.
+   *  - On or after the cards' expiry date: a real run exits 2 while someone is still waiting
+   *    for a card, 1 when only tag repairs failed; its dry run says the same as a warning and
+   *    exits 0.
    * People still waiting = this run's queue; with --retry-failed and no failed row, the
    * people still pending (a normal run would have created theirs).
    */
   refuseNewCards(queue) {
-    const { log, config, summary: s, dryRun } = this;
+    const { log, summary: s, dryRun } = this;
     if (this.repairOnly) {
       if (s.tagFailed) log.warn(tagRetryText(s.tagFailed));
       log.info(dryRun ? REPAIR_ONLY_DRY_TEXT : REPAIR_ONLY_TEXT);
@@ -370,21 +360,21 @@ class IssueRun {
     if (!waiting) return s.tagFailed ? 1 : 0;
     s.newCardsRefused = waiting;
     if (dryRun) {
-      log.warn(`预演：真实运行今天只会补记和补打 tag，不会建新卡；还有 ${waiting} 人待建卡。`);
+      log.warn(`预演：真实运行只会补记和补打 tag，不会建新卡（礼品卡到期日 ${this.expiresOn} 已到）；还有 ${waiting} 人待建卡。`);
       return 0;
     }
-    log.error(`${tooLateText(config.remind1Date)}本次只做了补记和补打 tag，没有建新卡；还有 ${waiting} 人待建卡。`);
-    log.info(`现在是店铺时间 ${this.localTime(this.now().getTime())}；测试活动不受这个限制`);
+    log.error(`${tooLateText(this.expiresOn)}本次只做了补记和补打 tag，没有建新卡；还有 ${waiting} 人待建卡。`);
+    log.info(`现在是店铺时间 ${this.localTime(this.now().getTime())}`);
     return 2;
   }
 
   /**
-   * The store's date reached REMIND_1_DATE during a real run (it crossed midnight): no more
-   * cards. Everything done so far stays as it is; `left` people of this run's queue get none.
+   * The store's date reached the cards' expiry date during a real run (it crossed midnight): no
+   * more cards. Everything done so far stays as it is; `left` people of this run's queue get none.
    */
   stopByDate(date, ms, left) {
     this.summary.stoppedByDate = date;
-    this.log.error(`${tooLateText(this.config.remind1Date)}已处理的人都记在本地日志里；剩下的 ${left} 人今天不会再建卡。`);
+    this.log.error(`${tooLateText(this.expiresOn)}已处理的人都记在本地日志里；剩下的 ${left} 人不会再建卡。`);
     this.log.info(`现在是店铺时间 ${this.localTime(ms)}`);
     return 2;
   }
@@ -445,9 +435,9 @@ class IssueRun {
         log.info(`${p}${label(r)}：在 Shopify 上找到了上次那张卡（…${card.last4}，${formatUsd(card.amountCents)}），${this.dryRun ? '真实运行会补记' : '已补记'}，不会再建第二张`);
         this.warnCardDetails(r, card, cards.length);
       } else if (Number.isFinite(startedMs) && nowMs - startedMs >= this.unknownSettleMs) {
-        // Back to pending; from REMIND_1_DATE on the real campaign will not issue it again, so do not promise that.
+        // Back to pending; from the expiry date on nobody gets a new card, so do not promise that.
         const settled = `超过 ${durationText(this.unknownSettleMs)}仍查不到这张卡`;
-        const noReissue = this.dateBlocked ? noNewCardsText(this.config.remind1Date) : this.repairOnly ? REPAIR_ONLY_NO_REISSUE : null;
+        const noReissue = this.dateBlocked ? noNewCardsText(this.expiresOn) : this.repairOnly ? REPAIR_ONLY_NO_REISSUE : null;
         this.record({ op: 'reconcile.none', cid, note: noReissue ? `${settled}，确认未建成；${noReissue}` : `${settled}，确认未建成，可以重试` });
         this.setStatus(cid, STATUS.PENDING);
         this.summary.reconciledNone += 1;
@@ -473,11 +463,11 @@ class IssueRun {
     }
     const latest = Math.max(...blocked.map((b) => b.startedMs).filter(Number.isFinite));
     const retryAt = Number.isFinite(latest) ? Math.ceil((latest + this.unknownSettleMs) / 60_000) * 60_000 : NaN;
-    // A row still not found then goes back to pending, but from REMIND_1_DATE on (today, or by the
-    // time the next run may settle it) the real campaign creates no new card: no promise of a re-issue.
+    // A row still not found then goes back to pending, but from the expiry date on (today, or by
+    // the time the next run may settle it) no new card is created: no promise of a re-issue.
     const noReissue = this.dateBlocked || (Number.isFinite(retryAt) && this.blocksNewCardsAt(retryAt));
     const then = noReissue
-      ? `那时仍查不到的，程序会确认没有建成；${noNewCardsText(this.config.remind1Date)}。`
+      ? `那时仍查不到的，程序会确认没有建成；${noNewCardsText(this.expiresOn)}。`
       : this.repairOnly
         ? `那时仍查不到的，程序会确认没有建成；${REPAIR_ONLY_NO_REISSUE}。`
         : '那时仍查不到的，程序会确认没有建成并重新发放；';
@@ -486,9 +476,9 @@ class IssueRun {
     return 1;
   }
 
-  /** True when, at instant `ms`, the real campaign may no longer create cards (REMIND_1_DATE in store time). */
+  /** True when, at instant `ms`, no new card may be created any more (the expiry date, in store time). */
   blocksNewCardsAt(ms) {
-    return newCardsBlockedOn(this.config, this.selection, localDate(ms, this.tz));
+    return newCardsBlockedOn(this.selection, localDate(ms, this.tz));
   }
 
   // -- step 7: cards that exist but whose tag is missing ------------------------
@@ -618,10 +608,10 @@ class IssueRun {
           continue;
         }
         // The store's date again, right before this card: a long run may have crossed midnight
-        // into REMIND_1_DATE. The same instant is the card's create.start time.
+        // into the expiry date. The same instant is the card's create.start time.
         const startedMs = this.now().getTime();
         const date = localDate(startedMs, this.tz);
-        if (newCardsBlockedOn(this.config, this.selection, date)) return this.stopByDate(date, startedMs, queue.length - (i + j));
+        if (newCardsBlockedOn(this.selection, date)) return this.stopByDate(date, startedMs, queue.length - (i + j));
         const outcome = await this.issueOne(r, new Date(startedMs).toISOString());
         if (outcome === 'created') {
           consecutiveFailures = 0;
@@ -744,9 +734,9 @@ class IssueRun {
         this.setStatus(cid, STATUS.UNKNOWN);
         this.summary.unknown += 1;
         const retryAt = Math.ceil((Date.parse(startedIso) + this.unknownSettleMs) / 60_000) * 60_000;
-        // Settled after midnight into REMIND_1_DATE, a card that was not made is not made later either.
+        // Settled after midnight into the expiry date, a card that was not made is not made later either.
         const then = this.blocksNewCardsAt(retryAt)
-          ? `程序会先核对这张卡；查不到的确认没有建成，${noNewCardsText(this.config.remind1Date)}`
+          ? `程序会先核对这张卡；查不到的确认没有建成，${noNewCardsText(this.expiresOn)}`
           : '程序会先核对这张卡，查不到才会重新发放';
         log.error(`已停止：${label(r)} 的建卡结果不明，等了 ${durationText(this.reconcileWaitMs)}在 Shopify 上仍查不到这张卡${lookup}。为了不重复建卡，本次停止。`
           + `请在 ${this.localTime(retryAt)}（店铺时间）之后再运行：${then}`);
@@ -868,39 +858,23 @@ class IssueRun {
     const { config, selection, log } = this;
     const parts = [`批次 ${this.batch}`, `活动 ${config.campaignId}${selection.mode === 'test' ? '（测试活动）' : ''}`];
     if (this.repairOnly) parts.push('只补记和补打 tag，不建新卡（--repair-only）');
-    else if (this.dateBlocked) parts.push(`已到 REMIND_1_DATE（${config.remind1Date}）：只补记和补打 tag，不建新卡`);
+    else if (this.dateBlocked) parts.push(`已到礼品卡到期日（${this.expiresOn}）：只补记和补打 tag，不建新卡`);
     else parts.push(Number.isFinite(this.maxCreates) ? `本次最多建卡 ${this.maxCreates} 张` : '不限张数（预演全部剩下的人）');
     if (this.retryFailed) parts.push('只重试之前建卡失败的人');
     log.info(parts.join('｜'));
     if (this.dryRun) {
       log.info('预演（DRY_RUN）：只从 Shopify 读数据，不建卡、不发邮件、不打 tag；本地日志只记一条预演记录。真实运行要在命令前加 DRY_RUN=false');
-      if (selection.mode !== 'test' && !this.repairOnly) {
-        if (config.launchDate && this.today < config.launchDate) {
+      if (!this.repairOnly) {
+        if (selection.mode !== 'test' && config.launchDate && this.today < config.launchDate) {
           log.warn(`注意：正式活动要到 ${config.launchDate}（店铺时间）才能真实建卡发信；预演不受这个限制`);
         }
-        if (this.dateBlocked) log.warn(`注意：${tooLateText(config.remind1Date)}`);
+        if (this.dateBlocked) log.warn(`注意：${tooLateText(this.expiresOn)}`);
       }
     } else if (this.noNewCards) {
       log.info(`真实运行：只补记 Shopify 上已有的卡、补打 tag ${config.sentTag}；不建新卡，不发邮件`);
     } else {
       log.info(`真实运行：会建礼品卡（Shopify 建卡时自动给客户发首封邮件），然后给客户打 tag ${config.sentTag}`);
-      this.warnUtcEvening();
     }
-  }
-
-  /**
-   * Real runs of the real campaign that create cards: Shopify's docs do not say whether the
-   * template's 'now' is the store's date or UTC's. In the Los Angeles evening UTC is already the
-   * next day; when that day's copy differs, say so once (only daytime sends are right under both).
-   */
-  warnUtcEvening() {
-    if (this.selection.mode === 'test') return;
-    const utcDate = new Date(this.startMs).toISOString().slice(0, 10);
-    if (utcDate <= this.today) return;
-    const utcStage = firstEmailStageOn(this.config, utcDate);
-    if (utcStage === firstEmailStageOn(this.config, this.today)) return;
-    this.log.warn(`现在店铺时间 ${this.localTime(this.startMs)}，UTC 已是 ${utcDate}：如果 Shopify 按 UTC 日期选邮件文案，`
-      + `今天建卡发出的首封邮件会显示${STAGE_LABELS[utcStage]}文案。建议在洛杉矶时间 17:00 之前运行。`);
   }
 
   logProgress() {
@@ -944,10 +918,9 @@ class IssueRun {
     if (!rows.length) return;
     log.info(`前 ${Math.min(10, rows.length)} 人：`);
     for (const r of rows.slice(0, 10)) log.info(`  #${r.seq} ${r.name} <${r.email}> ${formatUsd(r.amountCents)}`);
-    // The email this batch would really get: Shopify sends it the day the card is created, which
-    // is today, and for the real campaign never before LAUNCH_DATE. The cards carry the
-    // selection's expiry date (createOptions), so the preview shows that one, not .env's.
-    const sendDate = this.selection.mode === 'test' ? this.today : laterDate(this.today, this.config.launchDate || this.today);
+    // The email this batch would really get. The cards carry the selection's expiry date
+    // (createOptions), so the preview shows that one, not .env's; its copy no longer depends on
+    // the send date.
     try {
       const preview = await this.renderPreview({
         config: this.config,
@@ -955,11 +928,10 @@ class IssueRun {
         variant: 'first',
         recipient: rows[0],
         log,
-        sendDate,
         expiresOn: this.selection.params.giftCardExpiresOn,
       });
       if (preview?.file) {
-        log.info(`首封邮件预览（用这一批第 1 个人 #${rows[0].seq} 的名字和金额，按 ${sendDate} 发送时的文案）：${preview.file}`
+        log.info(`首封邮件预览（用这一批第 1 个人 #${rows[0].seq} 的名字和金额）：${preview.file}`
           + `${preview.subject ? `（主题：${preview.subject}）` : ''}`);
       }
     } catch (err) {
@@ -985,7 +957,7 @@ class IssueRun {
     if (s.reconciled) log.info(`${will}补记 Shopify 上已有的卡：${s.reconciled} 张`);
     if (s.reconciledNone) {
       log.info(this.dateBlocked
-        ? `${will}确认上次没有建成：${s.reconciledNone} 人；${noNewCardsText(this.config.remind1Date)}`
+        ? `${will}确认上次没有建成：${s.reconciledNone} 人；${noNewCardsText(this.expiresOn)}`
         : this.repairOnly
           ? `${will}确认上次没有建成：${s.reconciledNone} 人；${REPAIR_ONLY_NO_REISSUE}`
           : `${will}确认上次没有建成、重新排队：${s.reconciledNone} 人`);
@@ -1074,11 +1046,6 @@ function selectionReplaced(paths, selection) {
   } catch {
     return true;
   }
-}
-
-/** The later of two YYYY-MM-DD dates. */
-function laterDate(a, b) {
-  return a > b ? a : b;
 }
 
 /** newRunId() is per second and pid; make sure it is new to this journal. */

@@ -7,9 +7,9 @@
 // The dictionaries exported under their old names are the Chinese ones;
 // labelsFor(lang) returns the pack of a language, which has the same names.
 //
-// Status codes come from src/campaign.js (STATUS, REMIND_STATUS); skip reasons
-// and verify issue types from the interface spec. An unknown code is shown
-// as-is, so a newer journal never breaks the report.
+// Status codes come from src/campaign.js (STATUS); skip reasons and verify
+// issue types from the interface spec. An unknown code is shown as-is, so a
+// newer (or older: the removed remind command's) journal never breaks the report.
 
 import { formatUsd } from '../select/amount.js';
 import { TEXT, textFor } from './text.js';
@@ -42,31 +42,27 @@ export const STATUS_FILLS = Object.freeze({
 export const STATUS_HELP = ZH.STATUS_HELP;
 /** Pre-flight skip reasons written by issue (journal op "skip"). */
 export const ISSUE_SKIP_LABELS = ZH.ISSUE_SKIP_LABELS;
-/** Reminder skip reasons written by remind (journal op "remind.skip"). */
-export const REMIND_SKIP_LABELS = ZH.REMIND_SKIP_LABELS;
 
 /**
- * The tag remind puts on a customer after each reminder of `round`: "<SENT_TAG>-R<round>",
- * e.g. OCT26RTPROMO-R1 (test campaign: OCT26RTPROMO-TEST-R1). The same name as
- * roundTag() in src/remind.js; test/excel.test.js checks that the two agree.
+ * The tag usage puts on the customer of every used card: "<SENT_TAG>-USED", e.g.
+ * OCT26RTPROMO-USED (test campaign OCT26RTPROMO-TEST2: OCT26RTPROMO-TEST2-USED). The same
+ * name as usedTagName() in src/usage.js; test/excel.test.js checks that the two agree.
  */
-export function roundTagName(sentTag, round) {
-  return `${sentTag}-R${round}`;
+export function usedTagName(sentTag) {
+  return `${sentTag}-USED`;
 }
 
-/** "第 N 次提醒" cell of a reminder found sent by its round tag (journal op remind.found, source 'tag'). */
-export const REMIND_SENT_BY_TAG = ZH.REMIND_SENT_BY_TAG;
-/** Added to a sent reminder's cell when tagging the customer with the round tag failed (remind.tag.fail). */
-export const REMIND_TAG_MISSING_SUFFIX = ZH.REMIND_TAG_MISSING_SUFFIX;
-/** Reminder cell texts explained on the "说明" sheet. */
-export const REMIND_HELP = ZH.REMIND_HELP;
+/** The Shopify Email recipient condition of the reminders (the same text in both editions). */
+export function reminderSegmentCondition(sentTag) {
+  return `customer_tags CONTAINS '${sentTag}' AND NOT customer_tags CONTAINS '${usedTagName(sentTag)}'`;
+}
 
 /**
- * The per-round tags explained on the "说明" sheet, with this campaign's tag names
- * (`sentTag` = the campaign's SENT_TAG): [item, text] pairs.
+ * How the reminders work now (Shopify Email + the used-card tag), on the "说明" sheet, with
+ * this campaign's tag names (`sentTag` = the campaign's SENT_TAG): [item, text] pairs.
  */
-export function roundTagHelp(sentTag, lang = 'zh') {
-  return textFor(lang).roundTagHelp(roundTagName(sentTag, 1), roundTagName(sentTag, 2));
+export function reminderHelp(sentTag, lang = 'zh') {
+  return textFor(lang).reminderHelp(sentTag, usedTagName(sentTag), reminderSegmentCondition(sentTag));
 }
 
 /** Customer kind of a recipient. */
@@ -84,8 +80,6 @@ export const RECONCILE_SOURCE_LABELS = ZH.RECONCILE_SOURCE_LABELS;
 export const VERIFY_TYPE_LABELS = ZH.VERIFY_TYPE_LABELS;
 /** selection.snapshot.source. */
 export const SNAPSHOT_SOURCE_LABELS = ZH.SNAPSHOT_SOURCE_LABELS;
-/** run.end summary `stopped` values written by remind. */
-export const STOP_LABELS = ZH.STOP_LABELS;
 /** Fixed English notes some journal entries carry (anything else is shown as-is). */
 export const NOTE_LABELS = ZH.NOTE_LABELS;
 /** usage.json unmatched[].reason codes that may appear (anything else is shown as-is). */
@@ -160,14 +154,6 @@ export function issueSkipText(reason, detail, options, lang = 'zh') {
   return d ? T.withDetail(label, d) : label;
 }
 
-/** Reminder skip reason with its optional detail; `options` as for detailText. */
-export function remindSkipText(reason, detail, options, lang = 'zh') {
-  const T = textFor(lang);
-  const label = labelOf(T.REMIND_SKIP_LABELS, reason);
-  const d = detailText(detail, options, T);
-  return d ? T.withDetail(label, d) : label;
-}
-
 /** A fixed English journal note in the pack's language; other notes through stored.text (Chinese: unchanged). */
 export function noteText(note, lang = 'zh') {
   if (note === null || note === undefined) return '';
@@ -193,7 +179,7 @@ const SHOPIFY_ERROR_FORMS = [
   [/^GraphQL error(?:: ([\s\S]*))?$/, (m, E) => E.graphql(m[1])],
   [/^Shopify returned non-JSON\b/, (m, E) => E.nonJson],
   [/^Shopify response contained no data$/, (m, E) => E.noData],
-  // src/customers.js addTag (also remind's round tag) and src/giftcards.js: a mutation answer without its payload
+  // src/customers.js addTag (issue's sent tag, usage's used tag) and src/giftcards.js: a mutation answer without its payload
   [/^[a-z][A-Za-z0-9]* returned no payload$/, (m, E) => E.noPayload],
 ];
 
@@ -207,8 +193,8 @@ function shopifyErrorText(message, T) {
 }
 
 /**
- * A journal error as people read it in the workbook (发放名单 备注/错误, the
- * reminder cells, 操作日志 错误), e.g.
+ * A journal error as people read it in the workbook (发放名单 备注/错误, 操作日志
+ * 错误), e.g.
  *   "giftCardCreate rejected: input: Customer is invalid [INVALID]" → "Shopify 拒绝：input: Customer is invalid（INVALID）"
  *   "Network error calling Shopify: fetch failed" → "网络错误：fetch failed"
  * Anything else (a text our commands wrote, another error) goes through the
@@ -238,7 +224,8 @@ export function errorText(message, lang = 'zh') {
 // run.end summaries → one line
 // ---------------------------------------------------------------------------
 
-// Already shown in their own columns of the run history (批次/轮次, 预演/实际).
+// Already shown in their own columns of the run history (批次, 预演/实际); `round` is the
+// removed remind command's (older journals).
 const SUMMARY_SKIP_KEYS = new Set(['batch', 'round', 'dryRun']);
 
 // A run's mode reads first ("只补记和补打 tag，补打 tag 2"), wherever the command put the key.
@@ -249,28 +236,21 @@ const MAX_SUMMARY_LENGTH = 500;
 // verify's own summary text when it failed: "失败：<message>" (the message may be Shopify's).
 const STORED_FAILED_TEXT = /^(失败：)(.+)$/s;
 
-/** The command a summary came from when the caller does not say (only issue and remind summaries need it). */
+/** The command a summary came from when the caller does not say (only issue summaries need it). */
 function summaryCommand(summary) {
-  if ('eligible' in summary || 'alreadySent' in summary || 'round' in summary) return 'remind';
   if ('tagFixed' in summary || 'attempted' in summary || 'seqFrom' in summary) return 'issue';
   return null;
-}
-
-function skipLabel(code, command, T) {
-  const [first, second] = command === 'remind' ? [T.REMIND_SKIP_LABELS, T.ISSUE_SKIP_LABELS] : [T.ISSUE_SKIP_LABELS, T.REMIND_SKIP_LABELS];
-  return own(first, code) ?? own(second, code) ?? String(code);
 }
 
 function keyLabel(key, ctx) {
   const S = ctx.T.runSummary;
   if (key === 'attempted' && ctx.dryRun && ctx.command === 'issue') return S.attemptedDry;
-  if (key === 'planned' && ctx.command === 'remind') return ctx.dryRun ? S.plannedDry : S.plannedLive;
   return own(ctx.T.SUMMARY_KEY_LABELS, key) ?? key;
 }
 
-/** Label of a key inside a nested object: `skipped` → skip reasons, `counts` → verify issue types. */
+/** Label of a key inside a nested object: `skipped` → issue skip reasons, `counts` → verify issue types. */
 function innerLabel(parent, key, ctx) {
-  if (parent === 'skipped') return skipLabel(key, ctx.command, ctx.T);
+  if (parent === 'skipped') return labelOf(ctx.T.ISSUE_SKIP_LABELS, key);
   if (parent === 'counts') return labelOf(ctx.T.VERIFY_TYPE_LABELS, key);
   return keyLabel(key, ctx);
 }
@@ -321,7 +301,7 @@ function summaryParts(obj, depth, ctx, parent = null) {
       continue;
     }
     if (top && key === 'stopped' && typeof value === 'string' && value) {
-      parts.push(own(T.STOP_LABELS, value) ?? T.runSummary.stopped(value));
+      parts.push(T.runSummary.stopped(value));
       continue;
     }
     if (top && key === 'error' && typeof value === 'string' && value) {

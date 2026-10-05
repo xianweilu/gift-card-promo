@@ -403,10 +403,10 @@ test('unknownSettleMs is configurable', async () => {
 
 // The action of a row verify puts back to pending (reconcile.none).
 const SETTLED_RETRY = '已在本地日志改回待发放，可以用 issue 重试';
-const SETTLED_NO_NEW_CARDS = (date) => `已在本地日志改回待发放；正式活动从 REMIND_1_DATE（${date}）起 issue 不再建新卡，确需补发请先改提醒日期并重贴模板`;
+const SETTLED_NO_NEW_CARDS = (date) => `已在本地日志改回待发放；礼品卡到期日（${date}）已到，issue 不再建新卡`;
 
-test('from REMIND_1_DATE on (store date) a row put back to pending does not promise an issue retry (the real campaign)', async () => {
-  env = testConfig();
+test('from the cards\' expiry date on (store date) a row put back to pending does not promise an issue retry', async () => {
+  env = testConfig(); // the list freezes GIFT_CARD_EXPIRES_ON=2026-10-19
   const { config } = env;
   const paths = campaignPaths(config);
   const list = customers(3);
@@ -414,48 +414,50 @@ test('from REMIND_1_DATE on (store date) a row put back to pending does not prom
   fake = installFakeShopify({ customers: list });
   const crashed = '2026-10-05T18:00:00.000Z'; // creates whose answer never came; no card was made
 
-  // 10/11 23:59 in Los Angeles (already 10/12 in UTC): issue still creates cards today.
+  // 10/18 23:59 in Los Angeles (already 10/19 in UTC): issue still creates cards today.
   writeJournal(paths, lost(1, crashed));
-  const eve = await runVerify({ config, log: memoryLog(), now: at('2026-10-12T06:59:00.000Z'), sleep: noSleep, writeReport: reportStub() });
+  const eve = await runVerify({ config, log: memoryLog(), now: at('2026-10-19T06:59:00.000Z'), sleep: noSleep, writeReport: reportStub() });
   assert.equal(eve.exitCode, 0);
   assert.deepEqual(eve.result.issues.map((i) => [i.type, tail(i.customerId), i.action]), [['resolved-unknown', '1', SETTLED_RETRY]]);
 
-  // 10/12 00:00 in Los Angeles: from now on a live issue of the real campaign only repairs.
+  // 10/19 00:00 in Los Angeles: from now on issue only repairs.
   writeJournal(paths, lost(2, crashed));
-  const day = await runVerify({ config, log: memoryLog(), now: at('2026-10-12T07:00:00.000Z'), sleep: noSleep, writeReport: reportStub() });
-  assert.deepEqual(day.result.issues.map((i) => [i.type, tail(i.customerId), i.action]), [['resolved-unknown', '2', SETTLED_NO_NEW_CARDS('2026-10-12')]]);
-  assert.equal(readJson(paths.verify).issues[0].action, SETTLED_NO_NEW_CARDS('2026-10-12'));
+  const day = await runVerify({ config, log: memoryLog(), now: at('2026-10-19T07:00:00.000Z'), sleep: noSleep, writeReport: reportStub() });
+  assert.deepEqual(day.result.issues.map((i) => [i.type, tail(i.customerId), i.action]), [['resolved-unknown', '2', SETTLED_NO_NEW_CARDS('2026-10-19')]]);
+  assert.equal(readJson(paths.verify).issues[0].action, SETTLED_NO_NEW_CARDS('2026-10-19'));
+  assert.equal(readJson(paths.verify).issues[0].actionEn, 'Set back to Pending in the local journal; the cards\' expiry date (2026-10-19) has been reached, so issue creates no new cards');
 
-  // 10/20: same text; the journal is still put back to pending (what Shopify proves does not change).
+  // 10/25: same text; the journal is still put back to pending (what Shopify proves does not change).
   writeJournal(paths, lost(3, crashed));
-  const late = await runVerify({ config, log: memoryLog(), now: at('2026-10-20T17:00:00.000Z'), sleep: noSleep, writeReport: reportStub() });
-  assert.equal(late.result.issues[0].action, SETTLED_NO_NEW_CARDS('2026-10-12'));
+  const late = await runVerify({ config, log: memoryLog(), now: at('2026-10-25T17:00:00.000Z'), sleep: noSleep, writeReport: reportStub() });
+  assert.equal(late.result.issues[0].action, SETTLED_NO_NEW_CARDS('2026-10-19'));
   assert.doesNotMatch(late.result.issues[0].action, /可以用 issue 重试/);
+  assert.doesNotMatch(late.result.issues[0].action, /REMIND/);
   assert.deepEqual(readJournal(paths.journal).filter((e) => e.op === 'reconcile.none').map((e) => tail(e.cid)), ['1', '2', '3']);
   const folded = foldJournal(readJournal(paths.journal)).customers;
   for (const n of [1, 2, 3]) assert.equal(folded.get(gid('Customer', n)).status, STATUS.PENDING, `customer ${n}`);
 });
 
-test('the no-new-cards date is the current REMIND_1_DATE (what issue checks), not the one frozen in the list', async () => {
-  env = testConfig(); // the list was made with REMIND_1_DATE=2026-10-12
+test('the no-new-cards date is the expiry frozen in the list (what issue checks), not today\'s .env', async () => {
+  env = testConfig(); // the list was made with GIFT_CARD_EXPIRES_ON=2026-10-19
   const list = customers(2);
   await selectionFixture(env.config, { customers: list });
-  const moved = testConfig({ CAMPAIGNS_DIR: env.dir, REMIND_1_DATE: '2026-10-13' }); // .env changed afterwards
+  const moved = testConfig({ CAMPAIGNS_DIR: env.dir, GIFT_CARD_EXPIRES_ON: '2026-10-30' }); // .env changed afterwards
   try {
     const paths = campaignPaths(moved.config);
     fake = installFakeShopify({ customers: list });
     writeJournal(paths, lost(1, '2026-10-05T18:00:00.000Z'));
-    const first = await runVerify({ config: moved.config, log: memoryLog(), now: at('2026-10-12T17:00:00.000Z'), sleep: noSleep, writeReport: reportStub() });
-    assert.equal(first.result.issues[0].action, SETTLED_RETRY, 'on 10/12 issue may still create cards under REMIND_1_DATE=2026-10-13');
+    const first = await runVerify({ config: moved.config, log: memoryLog(), now: at('2026-10-18T17:00:00.000Z'), sleep: noSleep, writeReport: reportStub() });
+    assert.equal(first.result.issues[0].action, SETTLED_RETRY, 'on 10/18 issue still creates cards');
     writeJournal(paths, lost(2, '2026-10-05T18:00:00.000Z'));
-    const second = await runVerify({ config: moved.config, log: memoryLog(), now: at('2026-10-13T17:00:00.000Z'), sleep: noSleep, writeReport: reportStub() });
-    assert.equal(second.result.issues[0].action, SETTLED_NO_NEW_CARDS('2026-10-13'));
+    const second = await runVerify({ config: moved.config, log: memoryLog(), now: at('2026-10-19T17:00:00.000Z'), sleep: noSleep, writeReport: reportStub() });
+    assert.equal(second.result.issues[0].action, SETTLED_NO_NEW_CARDS('2026-10-19'), 'the cards were made with 10/19, whatever .env says now');
   } finally {
     moved.cleanup();
   }
 });
 
-test('a test campaign keeps "可以用 issue 重试" after REMIND_1_DATE: issue creates its cards on any day', async () => {
+test('a test campaign is bound to the expiry date too; the old reminder dates mean nothing', async () => {
   env = testConfig({ CAMPAIGN_ID: '2026-10-test', SENT_TAG: 'OCT26RTPROMO-TEST', TEST_CUSTOMER_IDS: '1,2' });
   const { config } = env;
   const paths = campaignPaths(config);
@@ -470,38 +472,42 @@ test('a test campaign keeps "可以用 issue 重试" after REMIND_1_DATE: issue 
   writeJsonAtomic(paths.selection, selection);
   fake = installFakeShopify({ customers: list });
   writeJournal(paths, lost(1, '2026-10-05T18:00:00.000Z'));
-  const { exitCode, result } = await runVerify({ config, log: memoryLog(), now: at('2026-10-20T17:00:00.000Z'), sleep: noSleep, writeReport: reportStub() });
-  assert.equal(exitCode, 0);
+  const before = await runVerify({ config, log: memoryLog(), now: at('2026-10-16T17:00:00.000Z'), sleep: noSleep, writeReport: reportStub() });
+  assert.equal(before.exitCode, 0);
   assert.equal(selection.mode, 'test');
-  assert.deepEqual(result.issues.map((i) => [i.type, tail(i.customerId), i.action]), [['resolved-unknown', '1', SETTLED_RETRY]]);
+  assert.deepEqual(before.result.issues.map((i) => [i.type, tail(i.customerId), i.action]), [['resolved-unknown', '1', SETTLED_RETRY]]);
+  writeJournal(paths, lost(2, '2026-10-05T18:00:00.000Z'));
+  const after = await runVerify({ config, log: memoryLog(), now: at('2026-10-20T17:00:00.000Z'), sleep: noSleep, writeReport: reportStub() });
+  assert.deepEqual(after.result.issues.map((i) => [i.type, tail(i.customerId), i.action]), [['resolved-unknown', '2', SETTLED_NO_NEW_CARDS('2026-10-19')]]);
 });
 
-test('analyzeVerify: the no-new-cards text needs the real campaign, a REMIND_1_DATE and a store date on or after it', () => {
+test('analyzeVerify: the no-new-cards text needs an expiry date in the list and a store date on or after it', () => {
   const recipients = [{ seq: 1, customerId: gid('Customer', 1), amountCents: 1077 }];
   const unknown = { status: STATUS.UNKNOWN, startedAt: '2026-10-05T18:00:00.000Z', giftCardId: null, taggedAt: null, attempts: 1 };
-  const action = ({ mode = 'live', remind1Date = '2026-10-12', nowIso, timezone = 'America/Los_Angeles' }) => {
+  const action = ({ mode = 'live', giftCardExpiresOn = '2026-10-19', nowIso, timezone = 'America/Los_Angeles' }) => {
     const { issues, fixes } = analyzeVerify({
-      selection: { mode, params: { currency: 'USD' }, recipients },
+      selection: { mode, params: { currency: 'USD', giftCardExpiresOn }, recipients },
       state: { customers: new Map([[gid('Customer', 1), unknown]]) },
       cards: [],
       taggedIds: new Set(),
       nowMs: Date.parse(nowIso),
       tag: 'OCT26RTPROMO',
       timezone,
-      remind1Date,
     });
     assert.deepEqual(fixes.map((f) => f.op), ['reconcile.none'], 'the journal fix is the same either way');
     assert.deepEqual(issues.map((i) => i.type), ['resolved-unknown']);
     return issues[0].action;
   };
   assert.equal(action({ nowIso: '2026-10-11T23:00:00Z' }), SETTLED_RETRY);
-  assert.equal(action({ nowIso: '2026-10-12T06:59:59Z' }), SETTLED_RETRY, '10/11 23:59:59 in Los Angeles');
-  assert.equal(action({ nowIso: '2026-10-12T07:00:00Z' }), SETTLED_NO_NEW_CARDS('2026-10-12'), '10/12 00:00 in Los Angeles');
-  assert.equal(action({ nowIso: '2026-10-20T17:00:00Z' }), SETTLED_NO_NEW_CARDS('2026-10-12'));
-  assert.equal(action({ nowIso: '2026-10-12T05:00:00Z', timezone: 'UTC' }), SETTLED_NO_NEW_CARDS('2026-10-12'), 'the store\'s own calendar decides');
-  assert.equal(action({ mode: 'test', nowIso: '2026-10-20T17:00:00Z' }), SETTLED_RETRY);
-  assert.equal(action({ remind1Date: '', nowIso: '2026-10-20T17:00:00Z' }), SETTLED_RETRY, 'no REMIND_1_DATE configured');
-  // Older callers (no mode, no remind1Date): unchanged.
+  assert.equal(action({ nowIso: '2026-10-12T17:00:00Z' }), SETTLED_RETRY, 'the old REMIND_1_DATE is just another day');
+  assert.equal(action({ nowIso: '2026-10-19T06:59:59Z' }), SETTLED_RETRY, '10/18 23:59:59 in Los Angeles');
+  assert.equal(action({ nowIso: '2026-10-19T07:00:00Z' }), SETTLED_NO_NEW_CARDS('2026-10-19'), '10/19 00:00 in Los Angeles');
+  assert.equal(action({ nowIso: '2026-10-25T17:00:00Z' }), SETTLED_NO_NEW_CARDS('2026-10-19'));
+  assert.equal(action({ nowIso: '2026-10-19T05:00:00Z', timezone: 'UTC' }), SETTLED_NO_NEW_CARDS('2026-10-19'), 'the store\'s own calendar decides');
+  assert.equal(action({ mode: 'test', nowIso: '2026-10-25T17:00:00Z' }), SETTLED_NO_NEW_CARDS('2026-10-19'), 'test campaigns too');
+  assert.equal(action({ giftCardExpiresOn: '', nowIso: '2026-12-20T17:00:00Z' }), SETTLED_RETRY, 'cards that never expire');
+  assert.equal(action({ giftCardExpiresOn: null, nowIso: '2026-12-20T17:00:00Z' }), SETTLED_RETRY, 'no expiry in the list');
+  // Older callers (no mode, no expiry in params, a remind1Date that is now ignored): unchanged.
   const { issues } = analyzeVerify({
     selection: { params: { currency: 'USD' }, recipients },
     state: { customers: new Map([[gid('Customer', 1), unknown]]) },
@@ -509,6 +515,7 @@ test('analyzeVerify: the no-new-cards text needs the real campaign, a REMIND_1_D
     taggedIds: new Set(),
     nowMs: Date.parse('2026-10-20T17:00:00Z'),
     tag: 'OCT26RTPROMO',
+    remind1Date: '2026-10-12',
   });
   assert.equal(issues[0].action, SETTLED_RETRY);
 });
@@ -633,7 +640,7 @@ test('analyzeVerify: every English text variant (journal states, durations, extr
   const G = (n) => gid('GiftCard', n);
   const selection = {
     mode: 'live',
-    params: { currency: 'USD' },
+    params: { currency: 'USD', giftCardExpiresOn: '2026-10-19' },
     recipients: Array.from({ length: 9 }, (_, i) => ({ seq: i + 1, customerId: C(i + 1), amountCents: 1077 })),
   };
   const started = '2026-10-05T16:00:00.000Z'; // 09:00 Los Angeles
@@ -650,10 +657,10 @@ test('analyzeVerify: every English text variant (journal states, durations, extr
       [C(4), { status: STATUS.CREATED, giftCardId: G(41), last4: 'x041', createdAt: started, taggedAt: null }],
       // c5: done but the tag is gone in Shopify → tag-missing; a used extra card and a disabled extra card
       [C(5), { status: STATUS.DONE, giftCardId: G(51), last4: 'x051', createdAt: started, taggedAt: started }],
-      // c6: unknown, settled on/after REMIND_1_DATE → "no new cards" action
+      // c6: unknown, settled on/after the cards' expiry date → "no new cards" action
       [C(6), { status: STATUS.UNKNOWN, startedAt: started, giftCardId: null, taggedAt: null, attempts: 1 }],
       // c7: in progress 90 seconds ago → still-unknown "in about 9 minutes" (seconds rounded up)
-      [C(7), { status: STATUS.IN_PROGRESS, startedAt: '2026-10-12T16:58:30.000Z', giftCardId: null, taggedAt: null }],
+      [C(7), { status: STATUS.IN_PROGRESS, startedAt: '2026-10-19T16:58:30.000Z', giftCardId: null, taggedAt: null }],
       // c8: skipped with an unknown reason code
       [C(8), { status: STATUS.SKIPPED, skipReason: 'something-new', giftCardId: null, taggedAt: null }],
     ]),
@@ -672,10 +679,9 @@ test('analyzeVerify: every English text variant (journal states, durations, extr
     state,
     cards,
     taggedIds: new Set([C(2), C(3)]),
-    nowMs: Date.parse('2026-10-12T17:00:00.000Z'), // 10/12 10:00 Los Angeles, REMIND_1_DATE reached
+    nowMs: Date.parse('2026-10-19T17:00:00.000Z'), // 10/19 10:00 Los Angeles, the expiry date reached
     tag: 'OCT26RTPROMO',
     timezone: 'America/Los_Angeles',
-    remind1Date: '2026-10-12',
   });
 
   const find = (type, n, cardN = undefined) => {
@@ -705,9 +711,9 @@ test('analyzeVerify: every English text variant (journal states, durations, extr
   assert.equal(find('card-disabled', 5, 53).actionEn, 'This is an extra card and already disabled, nothing to do');
   assert.equal(find('resolved-unknown', 6).journalEn, 'Needs review: card creation started 2026-10-05 09:00 Los Angeles time, outcome unknown');
   assert.equal(find('resolved-unknown', 6).shopifyEn, 'Card still not found more than 10 minutes after creation started; confirmed not created');
-  assert.equal(find('resolved-unknown', 6).actionEn, 'Set back to Pending in the local journal; for the live campaign issue creates no new cards from REMIND_1_DATE (2026-10-12) on. To issue it anyway, move the reminder date first and re-paste the templates');
-  assert.equal(find('resolved-unknown', 6).action, '已在本地日志改回待发放；正式活动从 REMIND_1_DATE（2026-10-12）起 issue 不再建新卡，确需补发请先改提醒日期并重贴模板', 'the Chinese text is unchanged');
-  assert.equal(find('still-unknown', 7).journalEn, 'In progress: card creation started 2026-10-12 09:58 Los Angeles time, no result recorded');
+  assert.equal(find('resolved-unknown', 6).actionEn, 'Set back to Pending in the local journal; the cards\' expiry date (2026-10-19) has been reached, so issue creates no new cards');
+  assert.equal(find('resolved-unknown', 6).action, '已在本地日志改回待发放；礼品卡到期日（2026-10-19）已到，issue 不再建新卡');
+  assert.equal(find('still-unknown', 7).journalEn, 'In progress: card creation started 2026-10-19 09:58 Los Angeles time, no result recorded');
   assert.equal(find('still-unknown', 7).shopifyEn, 'Card not found yet (a new card may not be in the search index yet)');
   assert.equal(find('still-unknown', 7).actionEn, 'Run verify or issue again in about 9 minutes to check');
   assert.equal(find('card-disabled', 8).journalEn, 'Skipped before issuing: something-new');

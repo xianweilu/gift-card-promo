@@ -6,14 +6,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import ExcelJS from 'exceljs';
 
-import { writeReport, statusLabel, remindLabel, adminUrl, effectiveStatus, numericId, OPEN_IN_EXCEL_WARNING } from '../src/report/excel.js';
-import { summaryText, detailText, issueSkipText, remindSkipText, errorText, USAGE_SPLIT_NOTE, roundTagName } from '../src/report/labels.js';
+import { writeReport, statusLabel, adminUrl, effectiveStatus, numericId, OPEN_IN_EXCEL_WARNING } from '../src/report/excel.js';
+import { summaryText, detailText, issueSkipText, errorText, USAGE_SPLIT_NOTE, usedTagName, reminderSegmentCondition } from '../src/report/labels.js';
 import { campaignPaths, appendJournal, acquireRunLock, writeJsonAtomic } from '../src/campaign.js';
 import { initClient, resetClient, gql, throwIfUserErrors } from '../src/shopify.js';
 import { addTag } from '../src/customers.js';
 import { campaignNote } from '../src/giftcards.js';
-// A namespace import: the round-tag contract test below names a missing roundTag export itself.
-import * as remindModule from '../src/remind.js';
+import { runUsage, usedTagName as usageUsedTagName, reminderSegmentCondition as usageSegmentCondition } from '../src/usage.js';
 import { installFakeShopify } from './fake-shopify.js';
 import { buildTestSelection, selectionParams } from '../src/select/selection.js';
 import { parseCustomer } from '../src/select/rules.js';
@@ -28,11 +27,12 @@ const FAST_LOCK = { pollMs: 5 };
 const RECIPIENT_HEADERS = [
   '序号', '状态', '批次', '客户 ID', '姓名', '邮箱', '营销状态', '客户类型', '上次有效订单号', '上次下单日期',
   '最近订单渠道', '距今天数', '上次订单总额', '金额算式', '档位', '礼品卡金额', '同地址账户数', '同地址其他账户',
-  '是否有 gift-card-sent-2026-10', '礼品卡 ID', '卡号后 4 位', '建卡时间', '打 tag 时间', '第 1 次提醒', '第 2 次提醒',
-  '已使用金额', '剩余余额', '使用的订单', '备注/错误', '城市', '州', '邮编', '订单数', '累计消费', '注册日期',
+  '是否有 gift-card-sent-2026-10', '礼品卡 ID', '卡号后 4 位', '建卡时间', '打 tag 时间',
+  '已使用金额', '剩余余额', '使用的订单', '用卡 tag', '备注/错误', '城市', '州', '邮编', '订单数', '累计消费', '注册日期',
 ];
 const COL = Object.fromEntries(RECIPIENT_HEADERS.map((h, i) => [h, i + 1]));
 COL.tag = COL['是否有 gift-card-sent-2026-10'];
+const USED_TAG = 'gift-card-sent-2026-10-USED'; // usedTagName(testConfig's SENT_TAG)
 
 const cust = (n) => gid('Customer', n);
 const card = (n) => gid('GiftCard', n);
@@ -82,7 +82,7 @@ function journalAt(paths, items) {
   for (const [t, entry] of items) appendJournal(paths.journal, entry, { now: () => t });
 }
 
-// run.end summaries exactly as the commands write them (src/issue.js emptySummary, src/remind.js newSummary).
+// run.end summaries exactly as the commands write them (src/issue.js emptySummary, src/usage.js runEndSummary).
 const ISSUE_SUMMARY = {
   batch: 1, dryRun: false, attempted: 7, created: 4, tagged: 3, tagFixed: 0, reconciled: 0, skipped: { 'ordered-since-snapshot': 1 },
   failed: 1, rejected: 0, unknown: 1, amountCents: 6000, tagFailed: 1, reconciledNone: 0, stillUnknown: 0, seqFrom: 1, seqTo: 9,
@@ -93,13 +93,13 @@ const ISSUE_DRY_SUMMARY = {
   failed: 0, rejected: 0, unknown: 0, amountCents: 1977, tagFailed: 0, reconciledNone: 0, stillUnknown: 2, seqFrom: 9, seqTo: 9,
 };
 const ISSUE_DRY_SUMMARY_TEXT = '将建卡 1，补打 tag 1，金额 $19.77，仍需人工核对 2，序号 9';
-const REMIND_SUMMARY = {
-  round: 1, dryRun: false, eligible: 3, planned: 3, attempted: 3, sent: 1, failed: 1, rejected: 0, unknown: 1, retriedUnknown: 0,
-  skipped: { used: 1 }, alreadySent: 0, previouslyFailed: 0, waitingUnknown: 0, notIssued: 5, stopped: null,
+const USAGE_SUMMARY = {
+  issuedCards: 4, usedCards: 2, usedCents: 1500, orders: 2, ordersTotalCents: 8500, giftCardCents: 1500, unmatched: 1,
+  usedTagged: 0, usedTagAdded: 1, usedTagFailed: 1,
 };
-const REMIND_SUMMARY_TEXT = '符合条件 3，本次要发 3，尝试 3，已发 1，失败 1，结果不明 1，跳过（已用过卡 1），未建卡 5';
+const USAGE_SUMMARY_TEXT = '发出的卡 4，已用的卡 2，已用金额 $15.00，订单 2，订单总额 $85.00，礼品卡抵扣 $15.00，需人工核对的付款 1，新打用卡 tag 1，打用卡 tag 失败 1';
 
-/** Journal covering every issue status and reminder outcome. */
+/** Journal covering every issue status and the used-card tag (added, refused, added on retry). */
 function writeFixtureJournal(paths, amount) {
   const R1 = '20261005160000-1';
   const R2 = '20261005170000-1';
@@ -134,24 +134,19 @@ function writeFixtureJournal(paths, amount) {
     [T(16, 7, 1), { op: 'create.start', cid: cust(15), amountCents: amount(15), batch: 1, run: R1 }],
     [T(16, 7, 2), { op: 'create.ok', cid: cust(15), giftCardId: card(1015), last4: 'x015', amountCents: amount(15), batch: 1, run: R1 }],
     [T(16, 7, 3), { op: 'tag.ok', cid: cust(15), run: R1 }],
-    // run.end summaries in the shapes src/issue.js and src/remind.js write
+    // run.end summaries in the shapes src/issue.js and src/usage.js write
     [T(16, 8, 0), { op: 'run.end', run: R1, summary: ISSUE_SUMMARY, exitCode: 1 }],
     // a dry run
     [T(17, 0, 0), { op: 'run.start', run: R2, command: 'issue', dryRun: true, batch: 2, limit: 500 }],
     [T(17, 0, 5), { op: 'run.end', run: R2, summary: ISSUE_DRY_SUMMARY, exitCode: 0 }],
-    // reminders, round 1
-    ['2026-10-12T16:00:00.000Z', { op: 'run.start', run: R3, command: 'remind', dryRun: false, options: { round: 1 } }],
-    ['2026-10-12T16:04:59.000Z', { op: 'remind.start', cid: cust(1), round: 1, giftCardId: card(1001), run: R3 }],
-    ['2026-10-12T16:05:00.000Z', { op: 'remind.ok', cid: cust(1), round: 1, run: R3 }],
-    ['2026-10-12T16:05:10.000Z', { op: 'remind.skip', cid: cust(2), round: 1, reason: 'used', run: R3 }],
-    ['2026-10-12T16:05:20.000Z', { op: 'remind.start', cid: cust(15), round: 1, giftCardId: card(1015), run: R3 }],
-    ['2026-10-12T16:05:50.000Z', { op: 'remind.unknown', cid: cust(15), round: 1, error: 'Network error calling Shopify', run: R3 }],
-    ['2026-10-12T16:06:00.000Z', { op: 'remind.start', cid: cust(14), round: 1, giftCardId: card(1014), run: R3 }],
-    ['2026-10-12T16:06:01.000Z', { op: 'remind.fail', cid: cust(14), round: 1, error: 'giftCardSendNotificationToCustomer rejected: boom', run: R3 }],
-    ['2026-10-12T16:07:00.000Z', { op: 'run.end', run: R3, summary: REMIND_SUMMARY, exitCode: 1 }],
-    // round 2, interrupted after remind.start (no run.end)
-    ['2026-10-16T16:00:00.000Z', { op: 'run.start', run: R4, command: 'remind', dryRun: false, options: { round: 2 } }],
-    ['2026-10-16T16:00:05.000Z', { op: 'remind.start', cid: cust(1), round: 2, giftCardId: card(1001), run: R4 }],
+    // usage: c1's used-card tag added, c2's refused
+    ['2026-10-12T16:00:00.000Z', { op: 'run.start', run: R3, command: 'usage', dryRun: false, batch: null, limit: null, options: {} }],
+    ['2026-10-12T16:05:00.000Z', { op: 'used.tag.ok', cid: cust(1), giftCardId: card(1001), run: R3 }],
+    ['2026-10-12T16:05:10.000Z', { op: 'used.tag.fail', cid: cust(2), giftCardId: card(1002), error: 'tagsAdd rejected: boom', run: R3 }],
+    ['2026-10-12T16:07:00.000Z', { op: 'run.end', run: R3, summary: USAGE_SUMMARY, exitCode: 0 }],
+    // a later usage run, interrupted before its run.end
+    ['2026-10-16T16:00:00.000Z', { op: 'run.start', run: R4, command: 'usage', dryRun: false, batch: null, limit: null, options: {} }],
+    ['2026-10-16T16:00:05.000Z', { op: 'used.tag.ok', cid: cust(2), giftCardId: card(1002), run: R4 }],
   ]);
 }
 
@@ -230,6 +225,7 @@ function usageFixture(amount) {
       ],
       topProducts: [{ name: 'Gold Balloon', quantity: 3, amountCents: 4500 }, { name: 'Helium Tank', quantity: 1, amountCents: 4000 }],
     },
+    usedTag: { tag: USED_TAG, taggedCustomerIds: [cust(1), cust(14)] },
   };
 }
 
@@ -320,7 +316,7 @@ describe('excel report', () => {
     assert.deepEqual(wb.worksheets.map((w) => w.name), ['汇总', '发放名单', '未入选', '同地址重复', '操作日志', '说明']);
   });
 
-  test('发放名单: headers, one row per recipient in seq order, statuses, tag column, reminders and notes', async () => {
+  test('发放名单: headers, one row per recipient in seq order, statuses, tag columns and notes', async () => {
     writeAllInputs();
     await writeReport({ config: env.config, paths, log: memoryLog(), now: FIXED_NOW, lockOptions: FAST_LOCK });
     const ws = (await openBook(paths.excel)).getWorksheet('发放名单');
@@ -361,14 +357,13 @@ describe('excel report', () => {
     assert.equal(at(3, 'tag'), '否');
     assert.equal(at(8, 'tag'), '否');
 
-    // reminder cells (store-local MM-DD HH:MM)
-    assert.equal(at(1, '第 1 次提醒'), '已发 10-12 09:05');
-    assert.equal(at(1, '第 2 次提醒'), '结果不明'); // remind.start without outcome, remind not running
-    assert.equal(at(2, '第 1 次提醒'), '跳过：已用过卡');
-    assert.equal(at(15, '第 1 次提醒'), '结果不明');
-    assert.equal(at(14, '第 1 次提醒'), '失败：Shopify 拒绝：boom');
-    assert.equal(at(3, '第 1 次提醒'), null);
-    assert.equal(ws.getRow(row(14)).getCell(COL['第 1 次提醒']).font?.color?.argb, 'FFC00000');
+    // used-card tag: c1 (journal + usage.json), c2 (journal: failed, then added by the later run), c14 (usage.json only)
+    assert.equal(at(1, '用卡 tag'), '是');
+    assert.equal(at(2, '用卡 tag'), '是');
+    assert.equal(at(14, '用卡 tag'), '是');
+    assert.equal(at(15, '用卡 tag'), '否');
+    assert.equal(at(3, '用卡 tag'), '否');
+    assert.equal(at(8, '用卡 tag'), '否');
 
     // links are HYPERLINK formulas
     const idCell = ws.getRow(row(1)).getCell(COL['客户 ID']).value;
@@ -439,9 +434,8 @@ describe('excel report', () => {
     assert.equal(cellValue(ws, r7, COL['状态']), '进行中');
     assert.equal(ws.getRow(r7).getCell(1).fill?.fgColor?.argb, 'FFDDEBF7');
     assert.doesNotMatch(cellValue(ws, r7, COL['备注/错误']), /中断/);
-    assert.equal(cellValue(ws, findRow(ws, COL['客户 ID'], '1'), COL['第 2 次提醒']), '结果不明');
 
-    release = acquireRunLock(paths, 'remind');
+    release = acquireRunLock(paths, 'usage');
     try {
       await writeReport({ config: env.config, paths, log: memoryLog(), now: FIXED_NOW, lockOptions: FAST_LOCK });
     } finally {
@@ -451,12 +445,11 @@ describe('excel report', () => {
     ws = wb.getWorksheet('发放名单');
     r7 = findRow(ws, COL['客户 ID'], '7');
     assert.equal(cellValue(ws, r7, COL['状态']), '需人工核对');
-    assert.equal(cellValue(ws, findRow(ws, COL['客户 ID'], '1'), COL['第 2 次提醒']), '进行中');
-    // the unfinished remind run shows as running in the run history
+    // the unfinished usage run shows as running in the run history
     const summary = wb.getWorksheet('汇总');
     const runRows = [];
-    for (let r = 1; r <= summary.rowCount; r += 1) if (cellValue(summary, r, 2) === 'remind') runRows.push(cellValue(summary, r, 8));
-    assert.deepEqual(runRows, [REMIND_SUMMARY_TEXT, '运行中']);
+    for (let r = 1; r <= summary.rowCount; r += 1) if (cellValue(summary, r, 2) === 'usage') runRows.push(cellValue(summary, r, 8));
+    assert.deepEqual(runRows, [USAGE_SUMMARY_TEXT, '运行中']);
   });
 
   test('every sheet is protected (filter and column widths allowed), has a frozen top row and its filter', async () => {
@@ -474,7 +467,7 @@ describe('excel report', () => {
     const list = wb.getWorksheet('发放名单');
     assert.equal(list.views[0].xSplit, 3);
     assert.equal(list.views[0].ySplit, 1);
-    assert.equal(list.autoFilter, `A1:AI${selection.recipients.length + 1}`);
+    assert.equal(list.autoFilter, `A1:AH${selection.recipients.length + 1}`);
     assert.equal(list.getRow(1).height, 30);
     assert.equal(list.getRow(1).getCell(1).font?.bold, true);
     assert.equal(list.getRow(1).getCell(1).fill?.fgColor?.argb, 'FF4472C4');
@@ -499,6 +492,9 @@ describe('excel report', () => {
     const orders = findRow(ws, 1, '带来订单');
     assert.deepEqual(rowValues(ws, orders, 4), ['带来订单', 2, 85, 42.5]);
     assert.deepEqual(rowValues(ws, orders + 1, 4), [null, null, usage.summary.giftCardCents / 100, usage.summary.customerPaidCents / 100]);
+    // the used-card tag line: who carries it per usage.json, what the latest usage run added / failed (its run.end)
+    assert.equal(cellValue(ws, orders + 3, 1), '已打用卡 tag 2 人（本次新打 1，失败 1）');
+    assert.equal(ws.getRow(orders + 3).getCell(1).font?.bold, true);
 
     const tiers = findRow(ws, 1, '按档位');
     assert.deepEqual(rowValues(ws, tiers + 1, 5), ['$10.77', 2, 1, 0.5, 5]);
@@ -544,16 +540,16 @@ describe('excel report', () => {
     assert.deepEqual(rowValues(check, 5, 3), ['仍需人工核对', '5', null]);
 
     const log = wb.getWorksheet('操作日志');
-    assert.deepEqual(rowValues(log, 1, 8), ['时间', '命令', '批次/轮次', '客户 ID', '动作', '结果/说明', '礼品卡 ID', '错误']);
+    assert.deepEqual(rowValues(log, 1, 8), ['时间', '命令', '批次', '客户 ID', '动作', '结果/说明', '礼品卡 ID', '错误']);
     const nonRun = fs.readFileSync(paths.journal, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((e) => !e.op.startsWith('run.'));
     assert.equal(log.actualRowCount, nonRun.length + 1);
     assert.deepEqual(rowValues(log, 3, 8), [wall(2026, 10, 5, 9, 0, 2), 'issue', '1', '1', '建卡成功', `金额 ${'$15.33'}，卡号后 4 位 x001`, '1001', null]);
     const skipRow = findRow(log, 5, '发放前跳过');
     assert.equal(cellValue(log, skipRow, 6), '导出后下过单（#7001）');
-    const remindRow = findRow(log, 5, '提醒已发');
-    assert.deepEqual(rowValues(log, remindRow, 5), [wall(2026, 10, 12, 9, 5), 'remind', '第 1 次提醒', '1', '提醒已发']);
-    const failRow = findRow(log, 5, '提醒失败');
-    assert.equal(cellValue(log, failRow, 8), 'Shopify 拒绝：boom');
+    const usedRow = findRow(log, 5, '打用卡 tag');
+    assert.deepEqual(rowValues(log, usedRow, 8), [wall(2026, 10, 12, 9, 5), 'usage', null, '1', '打用卡 tag', `已打 ${USED_TAG}`, '1001', null]);
+    const failRow = findRow(log, 5, '打用卡 tag 失败');
+    assert.deepEqual(rowValues(log, failRow, 8), [wall(2026, 10, 12, 9, 5, 10), 'usage', null, '2', '打用卡 tag 失败', `${USED_TAG} 没打上，下次运行 usage 会再试`, '1002', 'Shopify 拒绝：boom']);
 
     const sum = wb.getWorksheet('汇总');
     assert.equal(cellValue(sum, 1, 1), '本文件由程序生成，修改无效，每次运行会覆盖');
@@ -570,13 +566,12 @@ describe('excel report', () => {
     assert.deepEqual(rowValues(sum, findRow(sum, 1, '需人工核对'), 2), ['需人工核对', 2]);
     assert.deepEqual(rowValues(sum, findRow(sum, 1, '待发放'), 2), ['待发放', 1]);
     assert.equal(cellValue(sum, findRow(sum, 1, '下一个待发放的序号'), 2), seqOf(8));
-    // reminders per round, with the round's tag
-    assert.deepEqual(rowValues(sum, findRow(sum, 1, '轮次'), 9), ['轮次', '提醒日期', '已发', '跳过', '失败', '结果不明', '进行中', '还没处理（已建卡的人）', '本轮 tag']);
-    assert.deepEqual(rowValues(sum, findRow(sum, 1, '第 1 次提醒'), 9), ['第 1 次提醒', wall(2026, 10, 12), 1, 1, 1, 1, 0, 0, 'gift-card-sent-2026-10-R1']);
-    assert.deepEqual(rowValues(sum, findRow(sum, 1, '第 2 次提醒'), 9), ['第 2 次提醒', wall(2026, 10, 16), 0, 0, 0, 1, 0, 3, 'gift-card-sent-2026-10-R2']);
-    assert.deepEqual(rowValues(sum, findRow(sum, 1, '已用过卡'), 3), ['已用过卡', 1, 0]);
-    // usage block and run history
+    // no reminder table any more (the reminders go out with Shopify Email)
+    for (const gone of ['轮次', '第 1 次提醒', '第 2 次提醒', '第一次提醒', '第二次提醒', '本轮 tag', '提醒']) assert.equal(findRow(sum, 1, gone), null, gone);
+    // usage block (with the used-card tag) and run history
     assert.equal(cellValue(sum, findRow(sum, 1, '发出礼品卡（张）'), 2), 4);
+    assert.deepEqual(rowValues(sum, findRow(sum, 1, '已打用卡 tag（人）'), 3), ['已打用卡 tag（人）', 2, '本次新打 1，失败 1']);
+    assert.deepEqual(rowValues(sum, findRow(sum, 1, '开始时间'), 8), ['开始时间', '命令', '预演/实际', '批次', '数量上限', '退出码', '结束时间', '结果摘要']);
     const dry = findRow(sum, 3, '预演');
     assert.deepEqual(rowValues(sum, dry, 8), [wall(2026, 10, 5, 10, 0), 'issue', '预演', '2', 500, 0, wall(2026, 10, 5, 10, 0, 5), ISSUE_DRY_SUMMARY_TEXT]);
     const first = findRow(sum, 8, ISSUE_SUMMARY_TEXT);
@@ -616,11 +611,15 @@ describe('excel report', () => {
   test('说明 explains sheets, columns, statuses and the tier rule', async () => {
     await writeReport({ config: env.config, paths, log: memoryLog(), now: FIXED_NOW, lockOptions: FAST_LOCK });
     const ws = (await openBook(paths.excel)).getWorksheet('说明');
-    for (const title of [...RECIPIENT_HEADERS, '汇总', '未入选', '待发放', '已建卡未打tag', '结果不明', '档位 1', '档位 3']) {
+    for (const title of [...RECIPIENT_HEADERS, '汇总', '未入选', '待发放', '已建卡未打tag', '档位 1', '档位 3', '提醒邮件（Shopify Email）', '怎么发', '收件人条件', '用卡 tag']) {
       assert.ok(findRow(ws, 1, title), `说明 mentions ${title}`);
     }
     assert.equal(cellValue(ws, findRow(ws, 1, '档位 2'), 2), '基数 $10.78–$15.33 → $15.33');
     assert.equal(ws.getRow(findRow(ws, 1, '已完成')).getCell(1).fill?.fgColor?.argb, 'FFE2EFDA');
+    // the reminder texts of the remind command are gone
+    for (let r = 1; r <= ws.rowCount; r += 1) {
+      for (let c = 1; c <= 2; c += 1) assert.doesNotMatch(String(cellValue(ws, r, c) ?? ''), /本轮 tag|第 \d 次提醒|提醒状态|remind|REMIND_\d_DATE|重发礼品卡邮件/, `R${r}C${c}`);
+    }
   });
 
   test('--out copy is written (directory created) and a directory target gets the file name', async () => {
@@ -657,7 +656,7 @@ describe('excel report', () => {
     const ws = wb.getWorksheet('发放名单');
     assert.equal(ws.actualRowCount, 1);
     assert.deepEqual(rowValues(ws, 1, 2), ['序号', '状态']);
-    assert.equal(ws.autoFilter, 'A1:AI1');
+    assert.equal(ws.autoFilter, 'A1:AH1');
     const sum = wb.getWorksheet('汇总');
     assert.deepEqual(rowValues(sum, findRow(sum, 1, '最终入选'), 2), ['最终入选', 0]);
     assert.equal(cellValue(sum, findRow(sum, 1, '下一个待发放的序号'), 2), '没有待发放的人');
@@ -899,16 +898,9 @@ describe('excel review fixes', () => {
         { batch: 4, dryRun: false, attempted: 2, created: 1, tagged: 1, tagFixed: 2, reconciled: 3, skipped: { 'not-subscribed': 1, 'address-ordered-since-snapshot': 2 }, failed: 0, rejected: 1, unknown: 0, amountCents: 1077, tagFailed: 0, reconciledNone: 1, stillUnknown: 0, seqFrom: 30, seqTo: 31 },
         '尝试 2，建卡 1，打 tag 1，补打 tag 2，核对补记 3，跳过（未订阅营销邮件 1，同地址账户导出后下过单 2），被拒（可重试） 1，金额 $10.77，确认未建成 1，序号 30–31'],
       ['issue', false, { batch: 5, dryRun: false, attempted: 0, created: 0, tagged: 0, tagFixed: 0, reconciled: 0, skipped: {}, failed: 0, rejected: 0, unknown: 0, amountCents: 0, tagFailed: 0, reconciledNone: 0, stillUnknown: 0, seqFrom: null, seqTo: null }, '各项都是 0'],
-      ['remind', false, REMIND_SUMMARY, REMIND_SUMMARY_TEXT],
-      ['remind', true,
-        { round: 2, dryRun: true, eligible: 3, planned: 2, attempted: 0, sent: 0, failed: 0, rejected: 0, unknown: 0, retriedUnknown: 0, skipped: { 'not-subscribed': 1, 'card-expired': 1 }, alreadySent: 0, previouslyFailed: 0, waitingUnknown: 0, notIssued: 0, stopped: null },
-        '符合条件 3，将发 2，跳过（未订阅营销邮件 1，卡已过期 1）'],
-      ['remind', false,
-        { round: 1, dryRun: false, eligible: 9, planned: 9, attempted: 6, sent: 1, failed: 5, rejected: 0, unknown: 0, retriedUnknown: 2, skipped: {}, alreadySent: 4, previouslyFailed: 1, waitingUnknown: 3, notIssued: 0, stopped: 'too-many-failures' },
-        '符合条件 9，本次要发 9，尝试 6，已发 1，失败 5，补发（之前结果不明） 2，之前已发 4，之前失败 1，结果不明待核对 3，已停止：连续多次没有发送成功'],
-      ['remind', false, { round: 1, dryRun: false, eligible: 2, planned: 2, attempted: 1, sent: 1, stopped: 'aborted' }, '符合条件 2，本次要发 2，尝试 1，已发 1，已中断（Ctrl+C）'],
-      ['remind', false, { round: 1, dryRun: false, eligible: 2, planned: 2, attempted: 1, rejected: 1, stopped: 'rejected' }, '符合条件 2，本次要发 2，尝试 1，被拒（可重试） 1，已停止：Shopify 没有接受发送请求'],
       ['usage', false, { issuedCards: 5, usedCards: 1, usedCents: 500, orders: 1, ordersTotalCents: 4500, giftCardCents: 500, unmatched: 0 }, '发出的卡 5，已用的卡 1，已用金额 $5.00，订单 1，订单总额 $45.00，礼品卡抵扣 $5.00'],
+      ['usage', false, USAGE_SUMMARY, USAGE_SUMMARY_TEXT],
+      ['usage', false, { issuedCards: 5, usedCards: 3, usedCents: 900, orders: 3, ordersTotalCents: 9000, giftCardCents: 900, unmatched: 0, usedTagged: 2, usedTagAdded: 1, usedTagFailed: 0 }, '发出的卡 5，已用的卡 3，已用金额 $9.00，订单 3，订单总额 $90.00，礼品卡抵扣 $9.00，已带用卡 tag 2，新打用卡 tag 1'],
       ['usage', false, { error: 'GraphQL error: Throttled' }, '出错：Shopify 查询错误：Throttled'],
       ['verify', false, { cardCount: 12, taggedCount: 10, issueCount: 4, fixedCount: 0, counts: { 'duplicate-cards': 1, 'amount-mismatch': 3 }, text: '卡 12 张，发现 4 条，补记日志 0 条' }, '卡 12 张，发现 4 条，补记日志 0 条'],
       ['verify', false, { cardCount: 12, taggedCount: 10, issueCount: 4, fixedCount: 0, counts: { 'duplicate-cards': 1, 'amount-mismatch': 3 } }, '卡 12，带 tag 的客户 10，问题 4，分类（同一客户有多张卡 1，金额不一致 3）'],
@@ -917,20 +909,25 @@ describe('excel review fixes', () => {
     for (const [command, dryRun, summary, expected] of cases) {
       assert.equal(summaryText(summary, { command, dryRun }), expected, `${command} ${JSON.stringify(summary)}`);
       // the command is inferred when the caller does not pass it
-      if (command === 'issue' || command === 'remind') assert.equal(summaryText(summary), expected, `${command} (inferred)`);
+      if (command === 'issue') assert.equal(summaryText(summary), expected, `${command} (inferred)`);
       // an error message is shown as it came (it may be Shopify's English); everything else is Chinese
       if (!summary.error) assert.doesNotMatch(expected, /[a-z]+[A-Z]|\b[a-z]+(?:-[a-z]+)+\b|\b(?:source|text|bulk|paginated|aborted|rejected|error|true|false)\b/);
     }
     // older shapes still read
     assert.equal(summaryText({ created: 4, failed: 1, unknown: 1, skipped: 1 }), '建卡 4，失败 1，结果不明 1，跳过 1');
     assert.equal(summaryText(null), '');
+    // a summary of the removed remind command (an older journal) still reads: unknown keys as they are, a stop as "停止：…"
+    assert.equal(
+      summaryText({ round: 1, dryRun: false, eligible: 2, planned: 2, attempted: 1, sent: 1, skipped: { used: 1 }, stopped: 'aborted' }, { command: 'remind', dryRun: false }),
+      'eligible 2，planned 2，尝试 1，sent 1，跳过（used 1），停止：aborted',
+    );
   });
 
   test('G3: the 运行记录 shows the Chinese summaries of the real run.end shapes', async () => {
     writeAllInputs();
     const runs = [
       ['20261003190000-1', 'select', false, { recipients: 9, totalCents: 14000, source: 'bulk', snapshotReused: false }],
-      ['20261013170000-1', 'usage', false, { issuedCards: 4, usedCards: 2, usedCents: 1500, orders: 2, ordersTotalCents: 8500, giftCardCents: 1500, unmatched: 1 }],
+      ['20261013170000-1', 'usage', false, { issuedCards: 4, usedCards: 2, usedCents: 1500, orders: 2, ordersTotalCents: 8500, giftCardCents: 1500, unmatched: 1, usedTagged: 2, usedTagAdded: 0, usedTagFailed: 0 }],
       ['20261020170000-1', 'verify', false, { cardCount: 4, taggedCount: 3, issueCount: 2, fixedCount: 1, counts: { 'tag-missing': 1, 'still-unknown': 1 }, text: '卡 4 张，发现 2 条，补记日志 1 条' }],
     ];
     for (const [run, command, dryRun, summary] of runs) {
@@ -948,9 +945,9 @@ describe('excel review fixes', () => {
       'select: 入选 9，合计 $140.00，导出方式 全店导出',
       `issue: ${ISSUE_SUMMARY_TEXT}`,
       `issue: ${ISSUE_DRY_SUMMARY_TEXT}`,
-      `remind: ${REMIND_SUMMARY_TEXT}`,
-      'usage: 发出的卡 4，已用的卡 2，已用金额 $15.00，订单 2，订单总额 $85.00，礼品卡抵扣 $15.00，需人工核对的付款 1',
-      'remind: 没有正常结束（可能被中断）',
+      `usage: ${USAGE_SUMMARY_TEXT}`,
+      'usage: 发出的卡 4，已用的卡 2，已用金额 $15.00，订单 2，订单总额 $85.00，礼品卡抵扣 $15.00，需人工核对的付款 1，已带用卡 tag 2',
+      'usage: 没有正常结束（可能被中断）',
       'verify: 卡 4 张，发现 2 条，补记日志 1 条',
     ]);
   });
@@ -1035,9 +1032,8 @@ describe('excel review fixes', () => {
       [T(5), { op: 'skip', cid: cust(15), reason: 'ordered-since-snapshot', detail: '2026-12-01T20:15:00.000Z', batch: 1, run: R }], // PST
       [T(6), { op: 'reconcile.found', cid: cust(1), giftCardId: card(1001), last4: 'x001', amountCents: 1533, createdAt: T(5), source: 'preflight', run: R }],
       [T(7), { op: 'tag.ok', cid: cust(1), note: 'already tagged in Shopify', run: R }],
-      [T(8), { op: 'remind.skip', cid: cust(2), round: 1, reason: 'not-subscribed', detail: 'NOT_SUBSCRIBED', run: 'R2' }],
-      [T(9), { op: 'remind.skip', cid: cust(3), round: 1, reason: 'used', detail: '余额 $5.33 / 面额 $15.33', run: 'R2' }],
-      [T(10), { op: 'remind.start', cid: cust(14), round: 1, giftCardId: card(1014), retry: true, run: 'R2' }],
+      [T(8), { op: 'used.tag.ok', cid: cust(2), giftCardId: card(1002), run: 'U1' }],
+      [T(9), { op: 'used.tag.fail', cid: cust(3), giftCardId: card(1003), error: 'tagsAdd rejected: boom', run: 'U1' }],
     ]);
     await write();
     const log = (await openBook(paths.excel)).getWorksheet('操作日志');
@@ -1050,9 +1046,8 @@ describe('excel review fixes', () => {
       '导出后下过单（2026-12-01 12:15 店铺时间）',
       '发放前复查，金额 $15.33，卡号后 4 位 x001',
       'Shopify 上已带这个 tag',
-      '未订阅营销邮件（未订阅）',
-      '已用过卡（余额 $5.33 / 面额 $15.33）',
-      '重新发送（之前失败或结果不明）',
+      `已打 ${USED_TAG}`,
+      `${USED_TAG} 没打上，下次运行 usage 会再试`,
     ]);
     for (const text of results) assert.doesNotMatch(text, /gid:\/\/|\d{4}-\d{2}-\d{2}T|\b[A-Z]+_[A-Z]+\b|UNSUBSCRIBED/);
   });
@@ -1070,10 +1065,10 @@ describe('excel review fixes', () => {
     assert.equal(detailText(null), '');
     assert.equal(issueSkipText('relay-email', 'mail.codisto.com'), '邮箱域名在排除名单里（mail.codisto.com）');
     assert.equal(issueSkipText('customer-deleted'), '客户已删除');
-    assert.equal(remindSkipText('not-subscribed', 'INVALID'), '未订阅营销邮件（无效）');
+    assert.equal(issueSkipText('not-subscribed', 'INVALID'), '未订阅营销邮件（无效）');
     // codes that happen to be Object members are shown as they are, never as an inherited function
     assert.equal(detailText('constructor'), 'constructor');
-    assert.equal(remindSkipText('toString'), 'toString');
+    assert.equal(issueSkipText('toString'), 'toString');
     assert.equal(summaryText(JSON.parse('{"toString": 2, "skipped": {"constructor": 1}}')), 'toString 2，跳过（constructor 1）');
   });
 
@@ -1128,31 +1123,35 @@ describe('excel review fixes', () => {
 
   // ---- D5 / G9 ---------------------------------------------------------------
 
-  test('D5: 汇总 and the 提醒 table show the current .env dates, with a note when they changed after select; the expiry stays frozen', async () => {
+  test('D5: 汇总 shows the current .env launch date, with a note when it changed after select; the expiry stays frozen; no reminder dates', async () => {
     writeFixtureJournal(paths, amount);
-    const moved = { ...env.config, remind1Date: '2026-10-13', remind2Date: '2026-10-17', giftCardExpiresOn: '2026-10-20' };
+    const moved = { ...env.config, launchDate: '2026-10-06', giftCardExpiresOn: '2026-10-20' };
     await writeReport({ config: moved, paths, log: memoryLog(), now: FIXED_NOW, lockOptions: FAST_LOCK });
     const sum = (await openBook(paths.excel)).getWorksheet('汇总');
-    assert.deepEqual(rowValues(sum, findRow(sum, 1, '首封邮件日期（正式建卡）'), 3), ['首封邮件日期（正式建卡）', wall(2026, 10, 5), null]);
-    assert.deepEqual(rowValues(sum, findRow(sum, 1, '第一次提醒'), 3), ['第一次提醒', wall(2026, 10, 13), '生成名单时为 2026-10-12，现在按 .env 为 2026-10-13']);
-    assert.deepEqual(rowValues(sum, findRow(sum, 1, '第二次提醒'), 3), ['第二次提醒', wall(2026, 10, 17), '生成名单时为 2026-10-16，现在按 .env 为 2026-10-17']);
-    assert.equal(sum.getRow(findRow(sum, 1, '第一次提醒')).getCell(3).font?.color?.argb, 'FFC00000');
+    assert.deepEqual(rowValues(sum, findRow(sum, 1, '首封邮件日期（正式建卡）'), 3), ['首封邮件日期（正式建卡）', wall(2026, 10, 6), '生成名单时为 2026-10-05，现在按 .env 为 2026-10-06']);
+    assert.equal(sum.getRow(findRow(sum, 1, '首封邮件日期（正式建卡）')).getCell(3).font?.color?.argb, 'FFC00000');
     const expiry = rowValues(sum, findRow(sum, 1, '礼品卡到期日'), 3);
     assert.deepEqual(expiry.slice(0, 2), ['礼品卡到期日', wall(2026, 10, 19)], 'cards are created with the frozen expiry');
     assert.equal(expiry[2], '到期日当天仍可使用。注意：.env 的 GIFT_CARD_EXPIRES_ON 现在是 2026-10-20，但建卡仍用生成名单时的 2026-10-19');
-    assert.deepEqual(rowValues(sum, findRow(sum, 1, '第 1 次提醒'), 2), ['第 1 次提醒', wall(2026, 10, 13)]);
-    assert.deepEqual(rowValues(sum, findRow(sum, 1, '第 2 次提醒'), 2), ['第 2 次提醒', wall(2026, 10, 17)]);
-    assert.ok(findRow(sum, 1, '第 1 次提醒日期：生成名单时为 2026-10-12，现在按 .env 为 2026-10-13（remind 按现在的日期判断哪天能发）'));
-    assert.ok(findRow(sum, 1, '第 2 次提醒日期：生成名单时为 2026-10-16，现在按 .env 为 2026-10-17（remind 按现在的日期判断哪天能发）'));
+    // the reminder dates are gone from the config and from the sheet (an old list may still store them: ignored)
+    assert.equal(env.config.remind1Date, undefined);
+    assert.equal(env.config.remind2Date, undefined);
+    for (const gone of ['第一次提醒', '第二次提醒', '第 1 次提醒', '第 2 次提醒']) assert.equal(findRow(sum, 1, gone), null, gone);
+    for (let r = 1; r <= sum.rowCount; r += 1) assert.doesNotMatch(String(cellValue(sum, r, 1) ?? ''), /REMIND_\d_DATE|remind/);
   });
 
-  test('D5: unchanged dates get no notes', async () => {
-    await write();
+  test('D5: unchanged dates get no notes; an old list that still stores the reminder dates reads without them', async () => {
+    const sel = structuredClone(selection);
+    sel.params.remind1Date = '2026-10-12';
+    sel.params.remind2Date = '2026-10-16';
+    writeJsonAtomic(paths.selection, sel);
+    const result = await write();
+    assert.deepEqual(result.warnings, []);
     const sum = (await openBook(paths.excel)).getWorksheet('汇总');
-    assert.deepEqual(rowValues(sum, findRow(sum, 1, '第一次提醒'), 3), ['第一次提醒', wall(2026, 10, 12), null]);
+    assert.deepEqual(rowValues(sum, findRow(sum, 1, '首封邮件日期（正式建卡）'), 3), ['首封邮件日期（正式建卡）', wall(2026, 10, 5), null]);
     assert.deepEqual(rowValues(sum, findRow(sum, 1, '礼品卡到期日'), 3), ['礼品卡到期日', wall(2026, 10, 19), '到期日当天仍可使用']);
     for (let r = 1; r <= sum.rowCount; r += 1) {
-      for (let c = 1; c <= 8; c += 1) assert.doesNotMatch(String(cellValue(sum, r, c) ?? ''), /生成名单时为|GIFT_CARD_EXPIRES_ON 现在是/);
+      for (let c = 1; c <= 8; c += 1) assert.doesNotMatch(String(cellValue(sum, r, c) ?? ''), /生成名单时为|GIFT_CARD_EXPIRES_ON 现在是|提醒/);
     }
   });
 
@@ -1195,7 +1194,7 @@ describe('excel review fixes', () => {
 
 // ---------------------------------------------------------------------------
 // Round-2 fixes (round-2 fix spec R2-15 – R2-21). Journals are written by hand
-// in the shapes issue / remind write.
+// in the shapes issue / usage write.
 // ---------------------------------------------------------------------------
 
 /** The message src/shopify.js gql() throws when fetch behaves like `respond` (no network: fetch is replaced). */
@@ -1229,11 +1228,10 @@ const issueEnd = (fields = {}) => ({
   batch: null, dryRun: false, attempted: 0, created: 0, tagged: 0, tagFixed: 0, reconciled: 0, skipped: {}, failed: 0, rejected: 0,
   unknown: 0, amountCents: 0, tagFailed: 0, reconciledNone: 0, stillUnknown: 0, seqFrom: null, seqTo: null, ...fields,
 });
-/** A remind run.end summary as src/remind.js writes it (newSummary, keys in its order, round-tag counters included), with `fields` set. */
-const remindEnd = (fields = {}) => ({
-  round: 1, dryRun: false, eligible: 0, planned: 0, attempted: 0, sent: 0, failed: 0, rejected: 0, unknown: 0, retriedUnknown: 0,
-  retriedFailed: 0, skipped: {}, alreadySent: 0, alreadySentByTag: 0, previouslyFailed: 0, waitingUnknown: 0, notIssued: 0,
-  roundTagged: 0, roundTagFailed: 0, roundTagFixed: 0, roundTagMissing: 0, stopped: null, stoppedByDate: null, ...fields,
+/** A usage run.end summary as src/usage.js writes it (runEndSummary), with `fields` set. */
+const usageEnd = (fields = {}) => ({
+  issuedCards: 0, usedCards: 0, usedCents: 0, orders: 0, ordersTotalCents: 0, giftCardCents: 0, unmatched: 0,
+  usedTagged: 0, usedTagAdded: 0, usedTagFailed: 0, ...fields,
 });
 
 describe('excel round-2 fixes', () => {
@@ -1281,67 +1279,60 @@ describe('excel round-2 fixes', () => {
 
   // ---- R2-15 / R2-16 ---------------------------------------------------------
 
-  test('R2-15 / R2-16: 说明 explains exit code 2 after the reminder dates, and that 待发放 / 失败 get no new card from REMIND_1_DATE on', async () => {
+  test('R2-15 / R2-16: 说明 explains exit code 2 on the expiry date, and that 待发放 / 失败 get no new card from the expiry date on', async () => {
     await write();
     const help = (await openBook(paths.excel)).getWorksheet('说明');
     assert.equal(
       valueOf(help, '退出码 2'),
-      '用法错误：参数不对、缺少 --limit、还没到活动日期等，或已过 REMIND_1_DATE（issue 只补记和补打 tag，不建新卡）、已过 REMIND_2_DATE（不能再发第 1 次提醒）',
+      '用法错误：参数不对、缺少 --limit、还没到活动日期等，或礼品卡到期日已到（issue 只补记和补打 tag，不建新卡）',
     );
-    assert.equal(valueOf(help, '待发放'), '还没有处理；或核对确认上次没有建成卡，下次运行 issue 会重新处理。正式活动从 REMIND_1_DATE 起 issue 不再建新卡。');
-    assert.equal(valueOf(help, '失败'), 'Shopify 明确拒绝建卡，原因见“备注/错误”。只有 issue --retry-failed 才会重试。正式活动从 REMIND_1_DATE 起 issue 不再建新卡。');
-    for (const status of ['进行中', '需人工核对', '已建卡未打tag', '已完成', '发放前跳过']) assert.doesNotMatch(valueOf(help, status), /REMIND_1_DATE/, status);
+    assert.equal(valueOf(help, '待发放'), '还没有处理；或核对确认上次没有建成卡，下次运行 issue 会重新处理。礼品卡到期日当天及以后 issue 不再建新卡。');
+    assert.equal(valueOf(help, '失败'), 'Shopify 明确拒绝建卡，原因见“备注/错误”。只有 issue --retry-failed 才会重试。礼品卡到期日当天及以后 issue 不再建新卡。');
+    for (const status of ['进行中', '需人工核对', '已建卡未打tag', '已完成', '发放前跳过']) assert.doesNotMatch(valueOf(help, status), /到期日/, status);
     assert.deepEqual([0, 1, 130].map((code) => valueOf(help, `退出码 ${code}`)), ['成功', '中途停止或失败（原因见命令输出）', '按 Ctrl+C 中断（做完当前这个人后退出）']);
   });
 
   // ---- R2-17 -----------------------------------------------------------------
 
-  test('R2-17: run summaries with newCardsRefused, repairOnly and stoppedByDate read as Chinese', () => {
+  test('R2-17: run summaries with newCardsRefused, repairOnly and stoppedByDate read as Chinese (the expiry date was reached)', () => {
     const cases = [
-      // a live issue on/after REMIND_1_DATE: repairs only, no new card (exit 2)
-      ['issue', false, issueEnd({ batch: 3, newCardsRefused: 2 }), '没有建新卡（待建卡） 2'],
-      ['issue', false, issueEnd({ batch: 3, tagFixed: 1, reconciled: 1, newCardsRefused: 2 }), '补打 tag 1，核对补记 1，没有建新卡（待建卡） 2'],
+      // a live issue on/after the expiry date: repairs only, no new card (exit 2)
+      ['issue', false, issueEnd({ batch: 3, newCardsRefused: 2 }), '到期日已到，没有建新卡（待建卡） 2'],
+      ['issue', false, issueEnd({ batch: 3, tagFixed: 1, reconciled: 1, newCardsRefused: 2 }), '补打 tag 1，核对补记 1，到期日已到，没有建新卡（待建卡） 2'],
       // its dry run (R2-2): no simulated creates
-      ['issue', true, issueEnd({ batch: 3, dryRun: true, newCardsRefused: 2 }), '没有建新卡（待建卡） 2'],
+      ['issue', true, issueEnd({ batch: 3, dryRun: true, newCardsRefused: 2 }), '到期日已到，没有建新卡（待建卡） 2'],
       // --repair-only: the mode reads first, wherever the command put the key; false is left out
-      ['issue', false, issueEnd({ batch: 4, tagFixed: 2, newCardsRefused: 3, repairOnly: true }), '只补记和补打 tag，补打 tag 2，没有建新卡（待建卡） 3'],
+      ['issue', false, issueEnd({ batch: 4, tagFixed: 2, newCardsRefused: 3, repairOnly: true }), '只补记和补打 tag，补打 tag 2，到期日已到，没有建新卡（待建卡） 3'],
       ['issue', false, { repairOnly: true, ...issueEnd({ batch: 4, reconciled: 1 }) }, '只补记和补打 tag，核对补记 1'],
       ['issue', true, issueEnd({ batch: 4, dryRun: true, repairOnly: true }), '只补记和补打 tag'],
       ['issue', false, issueEnd({ batch: 4, tagFixed: 1, repairOnly: false }), '补打 tag 1'],
-      // a live run stopped when the store date reached REMIND_1_DATE (R2-1)
-      ['issue', false, issueEnd({ batch: 5, attempted: 3, created: 3, tagged: 3, amountCents: 3231, seqFrom: 4, seqTo: 6, stoppedByDate: '2026-10-12' }), '尝试 3，建卡 3，打 tag 3，金额 $32.31，序号 4–6，按日期停止 2026-10-12'],
-      // round 1 stopped when the store date reached REMIND_2_DATE (R2-7), with an expired card skipped
-      ['remind', false, remindEnd({ eligible: 5, planned: 5, attempted: 2, sent: 2, skipped: { 'card-expired': 1 }, stoppedByDate: '2026-10-16' }), '符合条件 5，本次要发 5，尝试 2，已发 2，跳过（卡已过期 1），按日期停止 2026-10-16'],
-      ['remind', false, remindEnd({ round: 2, eligible: 1, planned: 1, skipped: { 'card-expired': 1 } }), '符合条件 1，本次要发 1，跳过（卡已过期 1）'],
+      // a live run stopped when the store date reached the expiry date (R2-1)
+      ['issue', false, issueEnd({ batch: 5, attempted: 3, created: 3, tagged: 3, amountCents: 3231, seqFrom: 4, seqTo: 6, stoppedByDate: '2026-10-19' }), '尝试 3，建卡 3，打 tag 3，金额 $32.31，序号 4–6，中途停止（到期日已到） 2026-10-19'],
+      // usage: the used-card tag counters
+      ['usage', false, usageEnd({ issuedCards: 5, usedCards: 2, usedCents: 2154, orders: 2, ordersTotalCents: 9000, giftCardCents: 2154, usedTagged: 1, usedTagAdded: 1 }), '发出的卡 5，已用的卡 2，已用金额 $21.54，订单 2，订单总额 $90.00，礼品卡抵扣 $21.54，已带用卡 tag 1，新打用卡 tag 1'],
+      ['usage', false, usageEnd({ issuedCards: 5, usedCards: 2, usedCents: 2154, orders: 2, ordersTotalCents: 9000, giftCardCents: 2154, usedTagged: 2, usedTagFailed: 1 }), '发出的卡 5，已用的卡 2，已用金额 $21.54，订单 2，订单总额 $90.00，礼品卡抵扣 $21.54，已带用卡 tag 2，打用卡 tag 失败 1'],
     ];
     for (const [command, dryRun, summary, expected] of cases) {
       assert.equal(summaryText(summary, { command, dryRun }), expected, `${command} ${JSON.stringify(summary)}`);
       assert.equal(summaryText(summary), expected, `${command} (inferred) ${JSON.stringify(summary)}`);
-      assert.doesNotMatch(expected, /[a-z]+[A-Z]|\b[a-z]+(?:-[a-z]+)+\b|\b(?:true|false|repairOnly|newCardsRefused|stoppedByDate)\b/);
+      assert.doesNotMatch(expected, /[a-z]+[A-Z]|\b[a-z]+(?:-[a-z]+)+\b|\b(?:true|false|repairOnly|newCardsRefused|stoppedByDate|usedTag\w*)\b/);
     }
   });
 
   test('R2-17: every key the commands write in run.end has a Chinese label (keys as in src/*.js today)', () => {
     const ones = (keys) => Object.fromEntries(keys.map((k) => [k, 1]));
-    // select/index.js runSummary; issue.js emptySummary (+ R2 keys) and SKIP_REASONS; remind.js newSummary (+ R2 key, + the
-    // round-tag counters of the per-round tag spec) and REMIND_SKIP_REASONS; usage.js runEndSummary; verify.js summary and issue types
+    // select/index.js runSummary; issue.js emptySummary (+ R2 keys) and SKIP_REASONS; usage.js runEndSummary (+ the used-tag
+    // counters); verify.js summary and issue types
     const issueSkips = ['customer-deleted', 'no-email', 'relay-email', 'not-subscribed', 'already-tagged', 'ordered-since-snapshot', 'address-ordered-since-snapshot'];
-    const remindSkips = ['no-card', 'multiple-cards', 'card-disabled', 'card-expired', 'used', 'customer-deleted', 'no-email', 'not-subscribed'];
     const verifyTypes = ['missing-in-shopify', 'not-in-journal', 'not-in-selection', 'duplicate-cards', 'amount-mismatch', 'card-disabled', 'tag-missing', 'tag-without-card', 'still-unknown', 'resolved-unknown'];
     const summaries = [
       ['select', { recipients: 3, totalCents: 1077, source: 'paginated', snapshotReused: true }],
       ['issue', {
         batch: 1, dryRun: false,
         ...ones(['attempted', 'created', 'tagged', 'tagFixed', 'reconciled', 'failed', 'rejected', 'unknown', 'amountCents', 'tagFailed', 'reconciledNone', 'stillUnknown', 'newCardsRefused']),
-        skipped: ones(issueSkips), seqFrom: 1, seqTo: 2, repairOnly: true, stoppedByDate: '2026-10-12',
+        skipped: ones(issueSkips), seqFrom: 1, seqTo: 2, repairOnly: true, stoppedByDate: '2026-10-19',
       }],
-      ['remind', {
-        round: 1, dryRun: false,
-        ...ones(['eligible', 'planned', 'attempted', 'sent', 'failed', 'rejected', 'unknown', 'retriedUnknown', 'retriedFailed', 'alreadySent', 'previouslyFailed', 'waitingUnknown', 'notIssued']),
-        ...ones(['alreadySentByTag', 'roundTagged', 'roundTagFailed', 'roundTagFixed', 'roundTagMissing']),
-        skipped: ones(remindSkips), stopped: 'too-many-failures', stoppedByDate: '2026-10-16',
-      }],
-      ['usage', ones(['issuedCards', 'usedCards', 'usedCents', 'orders', 'ordersTotalCents', 'giftCardCents', 'unmatched'])],
+      ['usage', ones(['issuedCards', 'usedCards', 'usedCents', 'orders', 'ordersTotalCents', 'giftCardCents', 'unmatched', 'usedTagged', 'usedTagAdded', 'usedTagFailed'])],
       ['verify', { ...ones(['cardCount', 'taggedCount', 'issueCount', 'fixedCount']), counts: ones(verifyTypes) }],
     ];
     for (const [command, summary] of summaries) {
@@ -1352,17 +1343,15 @@ describe('excel round-2 fixes', () => {
     }
   });
 
-  test('R2-17: 运行记录 says why an issue run made no new card, marks repair-only runs and runs stopped by the date', async () => {
+  test('R2-17: 运行记录 says why an issue run made no new card (the expiry date), marks repair-only runs and runs stopped by the date', async () => {
     const at = (iso) => () => iso;
     const runs = [
       // [run, started (UTC), ended (UTC), run.start fields, summary, exit code]
       ['20261012170000-1', '2026-10-12T17:00:00.000Z', '2026-10-12T17:00:20.000Z', { command: 'issue', dryRun: true, batch: 3, limit: 5, options: { retryFailed: false } }, issueEnd({ batch: 3, dryRun: true, newCardsRefused: 2 }), 0],
       ['20261012170100-1', '2026-10-12T17:01:00.000Z', '2026-10-12T17:01:30.000Z', { command: 'issue', dryRun: false, batch: 3, limit: 5, options: { retryFailed: false } }, issueEnd({ batch: 3, tagFixed: 1, newCardsRefused: 2 }), 2],
       ['20261012170200-1', '2026-10-12T17:02:00.000Z', '2026-10-12T17:02:30.000Z', { command: 'issue', dryRun: false, batch: 4, limit: null, options: { retryFailed: false, repairOnly: true } }, issueEnd({ batch: 4, reconciled: 1, newCardsRefused: 2, repairOnly: true }), 0],
-      // started 10/11 23:50 store time, stopped at midnight
-      ['20261012065000-1', '2026-10-12T06:50:00.000Z', '2026-10-12T07:00:01.000Z', { command: 'issue', dryRun: false, batch: 2, limit: 500, options: { retryFailed: false } }, issueEnd({ batch: 2, attempted: 2, created: 2, tagged: 2, amountCents: 2154, seqFrom: 4, seqTo: 5, stoppedByDate: '2026-10-12' }), 2],
-      // round 1 started 10/15 23:55 store time, stopped at midnight
-      ['20261016065500-1', '2026-10-16T06:55:00.000Z', '2026-10-16T07:00:02.000Z', { command: 'remind', dryRun: false, batch: null, limit: null, options: { round: 1 } }, remindEnd({ eligible: 4, planned: 4, attempted: 1, sent: 1, stoppedByDate: '2026-10-16' }), 2],
+      // started 10/18 23:50 store time, stopped at midnight (the expiry date)
+      ['20261019065000-1', '2026-10-19T06:50:00.000Z', '2026-10-19T07:00:01.000Z', { command: 'issue', dryRun: false, batch: 2, limit: 500, options: { retryFailed: false } }, issueEnd({ batch: 2, attempted: 2, created: 2, tagged: 2, amountCents: 2154, seqFrom: 4, seqTo: 5, stoppedByDate: '2026-10-19' }), 2],
     ];
     for (const [run, started, ended, start, summary, exitCode] of runs) {
       appendJournal(paths.journal, { op: 'run.start', run, ...start }, { now: at(started) });
@@ -1371,11 +1360,10 @@ describe('excel round-2 fixes', () => {
     await write();
     const sum = (await openBook(paths.excel)).getWorksheet('汇总');
     assert.deepEqual(runHistory(sum), [
-      [wall(2026, 10, 11, 23, 50), 'issue', '实际', '2', 500, 2, wall(2026, 10, 12, 0, 0, 1), '尝试 2，建卡 2，打 tag 2，金额 $21.54，序号 4–5，按日期停止 2026-10-12'],
-      [wall(2026, 10, 12, 10, 0), 'issue', '预演', '3', 5, 0, wall(2026, 10, 12, 10, 0, 20), '没有建新卡（待建卡） 2'],
-      [wall(2026, 10, 12, 10, 1), 'issue', '实际', '3', 5, 2, wall(2026, 10, 12, 10, 1, 30), '补打 tag 1，没有建新卡（待建卡） 2'],
-      [wall(2026, 10, 12, 10, 2), 'issue', '实际', '4', null, 0, wall(2026, 10, 12, 10, 2, 30), '只补记和补打 tag，核对补记 1，没有建新卡（待建卡） 2'],
-      [wall(2026, 10, 15, 23, 55), 'remind', '实际', '第 1 次提醒', null, 2, wall(2026, 10, 16, 0, 0, 2), '符合条件 4，本次要发 4，尝试 1，已发 1，按日期停止 2026-10-16'],
+      [wall(2026, 10, 12, 10, 0), 'issue', '预演', '3', 5, 0, wall(2026, 10, 12, 10, 0, 20), '到期日已到，没有建新卡（待建卡） 2'],
+      [wall(2026, 10, 12, 10, 1), 'issue', '实际', '3', 5, 2, wall(2026, 10, 12, 10, 1, 30), '补打 tag 1，到期日已到，没有建新卡（待建卡） 2'],
+      [wall(2026, 10, 12, 10, 2), 'issue', '实际', '4', null, 0, wall(2026, 10, 12, 10, 2, 30), '只补记和补打 tag，核对补记 1，到期日已到，没有建新卡（待建卡） 2'],
+      [wall(2026, 10, 18, 23, 50), 'issue', '实际', '2', 500, 2, wall(2026, 10, 19, 0, 0, 1), '尝试 2，建卡 2，打 tag 2，金额 $21.54，序号 4–5，中途停止（到期日已到） 2026-10-19'],
     ]);
     for (const row of runHistory(sum)) assert.notEqual(row[7], '各项都是 0');
   });
@@ -1414,7 +1402,6 @@ describe('excel round-2 fixes', () => {
     // unchanged: the commands' Chinese texts, other errors, Shopify's own words
     for (const same of [
       '上次运行在建卡途中中断，Shopify 上暂时查不到这张卡',
-      '上次运行在发送这封提醒时中断，不知道是否已发出',
       '开始建卡超过 10 分钟仍没找到这张卡，确认没有建成',
       'Shopify ignored part of a search filter: created_at',
       'rejected: no operation name',
@@ -1428,7 +1415,7 @@ describe('excel round-2 fixes', () => {
     assert.equal(errorText(''), '');
   });
 
-  test('R2-18: 发放名单 备注/错误, the reminder cells and 操作日志 错误 show Shopify errors in Chinese; the journal keeps the raw text', async () => {
+  test('R2-18: 发放名单 备注/错误 and 操作日志 错误 show Shopify errors in Chinese (the used tag too); the journal keeps the raw text', async () => {
     const R1 = '20261005160000-7';
     const R2 = '20261012160000-7';
     const T = (mm, ss = 0) => `2026-10-05T16:${p2(mm)}:${p2(ss)}.000Z`;
@@ -1438,8 +1425,8 @@ describe('excel round-2 fixes', () => {
       tagFail: 'tagsAdd rejected: tags: Tag limit reached [INVALID]',
       throttled: 'Throttled by Shopify 6 times in a row; giving up',
       lost: 'Network error calling Shopify: fetch failed；查卡也失败了：GraphQL error: Internal error',
-      remindFail: 'giftCardSendNotificationToCustomer rejected: input: Customer has no email [INVALID]',
-      remindLost: 'Shopify HTTP 503: Service Unavailable',
+      usedTagFail: 'tagsAdd rejected: id: Customer not found [NOT_FOUND]',
+      usedTagLost: 'Shopify HTTP 503: Service Unavailable',
     };
     const created = (n, mm) => [
       [T(mm), { op: 'create.start', cid: cust(n), amountCents: amount(n), batch: 1, run: R1 }],
@@ -1460,14 +1447,11 @@ describe('excel round-2 fixes', () => {
       [T(6), { op: 'create.start', cid: cust(5), amountCents: amount(5), batch: 1, run: R1 }],
       [T(6, 9), { op: 'create.unknown', cid: cust(5), error: raw.lost, run: R1 }],
       [T(7), { op: 'run.end', run: R1, summary: issueEnd({ batch: 1, attempted: 6, created: 3, tagged: 2, failed: 1, rejected: 1, unknown: 1, tagFailed: 1 }), exitCode: 1 }],
-      [U(0), { op: 'run.start', run: R2, command: 'remind', dryRun: false, options: { round: 1 } }],
-      [U(1), { op: 'remind.start', cid: cust(14), round: 1, giftCardId: card(3014), run: R2 }],
-      [U(1, 1), { op: 'remind.fail', cid: cust(14), round: 1, error: raw.remindFail, run: R2 }],
-      [U(2), { op: 'remind.start', cid: cust(15), round: 1, giftCardId: card(3015), run: R2 }],
-      [U(2, 30), { op: 'remind.unknown', cid: cust(15), round: 1, error: raw.remindLost, run: R2 }],
-      [U(3), { op: 'remind.start', cid: cust(2), round: 1, giftCardId: card(3002), run: R2 }],
-      [U(3, 1), { op: 'remind.rejected', cid: cust(2), round: 1, error: 'HTTP 429 from Shopify 6 times in a row; giving up', run: R2 }],
-      [U(4), { op: 'run.end', run: R2, summary: remindEnd({ eligible: 3, planned: 3, attempted: 3, failed: 1, unknown: 1, rejected: 1, stopped: 'rejected' }), exitCode: 1 }],
+      [U(0), { op: 'run.start', run: R2, command: 'usage', dryRun: false, batch: null, limit: null, options: {} }],
+      [U(1, 1), { op: 'used.tag.fail', cid: cust(14), giftCardId: card(3014), error: raw.usedTagFail, run: R2 }],
+      [U(2, 30), { op: 'used.tag.fail', cid: cust(15), giftCardId: card(3015), error: raw.usedTagLost, run: R2 }],
+      [U(3), { op: 'used.tag.ok', cid: cust(2), giftCardId: card(3002), run: R2 }],
+      [U(4), { op: 'run.end', run: R2, summary: usageEnd({ issuedCards: 3, usedCards: 3, usedTagAdded: 1, usedTagFailed: 2 }), exitCode: 0 }],
     ]);
     await write();
     const wb = await openBook(paths.excel);
@@ -1478,9 +1462,7 @@ describe('excel round-2 fixes', () => {
     assert.equal(at(2, '备注/错误'), 'Shopify 拒绝：tags: Tag limit reached（INVALID）');
     assert.equal(at(3, '备注/错误'), 'Shopify 限流：连续 6 次被拒，已放弃');
     assert.equal(at(5, '备注/错误'), '网络错误：fetch failed；查卡也失败了：Shopify 查询错误：Internal error');
-    assert.equal(at(14, '第 1 次提醒'), '失败：Shopify 拒绝：input: Customer has no email（INVALID）');
-    assert.equal(at(15, '第 1 次提醒'), '结果不明');
-    assert.equal(at(2, '第 1 次提醒'), null, 'a remind.rejected send can be tried again');
+    assert.deepEqual([2, 14, 15].map((n) => at(n, '用卡 tag')), ['是', '否', '否'], 'a failed used tag is not carried');
 
     const log = wb.getWorksheet('操作日志');
     const errorOf = (n, op) => {
@@ -1491,13 +1473,13 @@ describe('excel round-2 fixes', () => {
     assert.equal(errorOf(2, '打 tag 失败'), 'Shopify 拒绝：tags: Tag limit reached（INVALID）');
     assert.equal(errorOf(3, '建卡未执行（可重试）'), 'Shopify 限流：连续 6 次被拒，已放弃');
     assert.equal(errorOf(5, '建卡结果不明'), '网络错误：fetch failed；查卡也失败了：Shopify 查询错误：Internal error');
-    assert.equal(errorOf(14, '提醒失败'), 'Shopify 拒绝：input: Customer has no email（INVALID）');
-    assert.equal(errorOf(15, '提醒结果不明'), 'Shopify 返回 HTTP 503：Service Unavailable');
-    assert.equal(errorOf(2, '提醒未发出（可重试）'), 'Shopify 限流：连续 6 次被拒，已放弃');
+    assert.equal(errorOf(14, '打用卡 tag 失败'), 'Shopify 拒绝：id: Customer not found（NOT_FOUND）');
+    assert.equal(errorOf(15, '打用卡 tag 失败'), 'Shopify 返回 HTTP 503：Service Unavailable');
+    assert.equal(errorOf(2, '打用卡 tag'), null);
     assert.equal(errorOf(14, '建卡成功'), null);
 
     // no cell of the workbook shows the internal English of src/shopify.js (the round-2 reviewer's check, widened)
-    const internal = (await allCells()).filter((t) => /\b[a-z][A-Za-z]+ rejected\b|Network error calling Shopify|Throttled by Shopify|HTTP 429 from Shopify|GraphQL error|Shopify HTTP \d|\[INVALID\]/.test(t));
+    const internal = (await allCells()).filter((t) => /\b[a-z][A-Za-z]+ rejected\b|Network error calling Shopify|Throttled by Shopify|HTTP 429 from Shopify|GraphQL error|Shopify HTTP \d|\[INVALID\]|\[NOT_FOUND\]/.test(t));
     assert.deepEqual(internal, []);
     // the journal is the record: it keeps Shopify's answer exactly
     const journal = fs.readFileSync(paths.journal, 'utf8');
@@ -1525,8 +1507,9 @@ describe('excel round-2 fixes', () => {
     assert.deepEqual(rowValues(report, orders + 1, 4), [null, null, (amount(1) + 700) / 100, usage.summary.customerPaidCents / 100], 'the split row');
     assert.deepEqual(rowValues(report, orders + 2, 3), [NOTE_TEXT, null, null], 'the note right under it');
     assert.equal(report.getRow(orders + 2).getCell(1).font?.color?.argb, 'FF7F7F7F', 'shown as a note');
-    assert.equal(cellValue(report, orders + 3, 1), null);
-    assert.equal(cellValue(report, orders + 4, 1), '按档位');
+    assert.equal(cellValue(report, orders + 3, 1), '已打用卡 tag 2 人（本次新打 1，失败 1）', 'then the used-tag line');
+    assert.equal(cellValue(report, orders + 4, 1), null);
+    assert.equal(cellValue(report, orders + 5, 1), '按档位');
 
     const sum = wb.getWorksheet('汇总');
     assert.deepEqual(rowValues(sum, findRow(sum, 1, '礼品卡抵扣'), 3), ['礼品卡抵扣', (amount(1) + 700) / 100, NOTE_TEXT]);
@@ -1566,15 +1549,10 @@ describe('excel round-2 fixes', () => {
 
   test('R2-21: the not-subscribed skip reads 未订阅营销邮件 everywhere, with the exact marketing state in brackets', async () => {
     const states = { UNSUBSCRIBED: '已退订', NOT_SUBSCRIBED: '未订阅', PENDING: '待确认', INVALID: '无效', REDACTED: '已隐去', NONE: '没有营销状态' };
-    for (const [state, label] of Object.entries(states)) {
-      assert.equal(issueSkipText('not-subscribed', state), `未订阅营销邮件（${label}）`);
-      assert.equal(remindSkipText('not-subscribed', state), `未订阅营销邮件（${label}）`);
-    }
+    for (const [state, label] of Object.entries(states)) assert.equal(issueSkipText('not-subscribed', state), `未订阅营销邮件（${label}）`);
     assert.equal(issueSkipText('not-subscribed'), '未订阅营销邮件');
-    assert.equal(remindLabel({ status: 'skipped', reason: 'not-subscribed', detail: 'PENDING' }, null, TZ), '跳过：未订阅营销邮件');
 
     const R1 = '20261005160000-8';
-    const R2 = '20261012160000-8';
     journalAt(paths, [
       ['2026-10-05T16:00:00.000Z', { op: 'run.start', run: R1, command: 'issue', dryRun: false, batch: 1, limit: 20 }],
       ['2026-10-05T16:00:01.000Z', { op: 'skip', cid: cust(2), reason: 'not-subscribed', detail: 'UNSUBSCRIBED', batch: 1, run: R1 }],
@@ -1582,9 +1560,6 @@ describe('excel round-2 fixes', () => {
       ['2026-10-05T16:00:03.000Z', { op: 'create.ok', cid: cust(1), giftCardId: card(1001), last4: 'x001', amountCents: amount(1), batch: 1, run: R1 }],
       ['2026-10-05T16:00:04.000Z', { op: 'tag.ok', cid: cust(1), run: R1 }],
       ['2026-10-05T16:00:05.000Z', { op: 'run.end', run: R1, summary: issueEnd({ batch: 1, attempted: 1, created: 1, tagged: 1, skipped: { 'not-subscribed': 1 } }), exitCode: 0 }],
-      ['2026-10-12T16:00:00.000Z', { op: 'run.start', run: R2, command: 'remind', dryRun: false, options: { round: 1 } }],
-      ['2026-10-12T16:00:01.000Z', { op: 'remind.skip', cid: cust(1), round: 1, reason: 'not-subscribed', detail: 'PENDING', run: R2 }],
-      ['2026-10-12T16:00:02.000Z', { op: 'run.end', run: R2, summary: remindEnd({ skipped: { 'not-subscribed': 1 } }), exitCode: 0 }],
     ]);
     await write();
     const wb = await openBook(paths.excel);
@@ -1593,32 +1568,26 @@ describe('excel round-2 fixes', () => {
     const row = (n) => findRow(list, COL['客户 ID'], String(n));
     assert.equal(cellValue(list, row(2), COL['状态']), '发放前跳过');
     assert.equal(cellValue(list, row(2), COL['备注/错误']), '未订阅营销邮件');
-    assert.equal(cellValue(list, row(1), COL['第 1 次提醒']), '跳过：未订阅营销邮件');
 
     const log = wb.getWorksheet('操作日志');
     assert.equal(cellValue(log, findRow(log, 5, '发放前跳过'), 6), '未订阅营销邮件（已退订）');
-    assert.equal(cellValue(log, findRow(log, 5, '提醒跳过'), 6), '未订阅营销邮件（待确认）');
 
     const sum = wb.getWorksheet('汇总');
     assert.deepEqual(rowValues(sum, findRow(sum, 1, '发放前跳过的原因') + 1, 2), ['未订阅营销邮件', 1]);
-    assert.deepEqual(rowValues(sum, findRow(sum, 1, '提醒跳过的原因') + 1, 3), ['未订阅营销邮件', 1, 0]);
-    assert.deepEqual(runHistory(sum).map((r) => r[7]), ['尝试 1，建卡 1，打 tag 1，跳过（未订阅营销邮件 1）', '跳过（未订阅营销邮件 1）']);
+    assert.deepEqual(runHistory(sum).map((r) => r[7]), ['尝试 1，建卡 1，打 tag 1，跳过（未订阅营销邮件 1）']);
 
     const help = wb.getWorksheet('说明');
-    assert.match(valueOf(help, '提醒跳过的原因'), /、未订阅营销邮件$/);
     assert.match(valueOf(help, '发放前跳过的原因'), /、未订阅营销邮件、/);
-    assert.equal(valueOf(help, '跳过：原因'), '这一轮不符合提醒条件，例如已用过卡、未订阅营销邮件、卡已停用或过期。再次运行同一轮会重新判断。');
 
     assert.deepEqual((await allCells()).filter((t) => t.includes('已退订营销邮件')), [], 'the old label is gone');
   });
 });
 
 // ---------------------------------------------------------------------------
-// Per-round reminder tags (round-tag spec of 2026-10-02, fixes duplicates-reminders N1):
-// after each reminder remind tags the customer with <SENT_TAG>-R<round>; a customer who
-// carries the round's tag counts as sent (journal op remind.found → a sent state with
-// source 'tag'), and a failed tagsAdd is journalled as remind.tag.fail (→ tagError on the
-// sent state). Journals are written by hand in the shapes the spec gives.
+// The used-card tag (reminders moved to Shopify Email, 2026-10-05): usage tags the customer of
+// every used card with <SENT_TAG>-USED (journal ops used.tag.ok / used.tag.fail, usage.json
+// usedTag.taggedCustomerIds, run.end usedTagged / usedTagAdded / usedTagFailed); the workbook
+// shows it in the 用卡 tag column, a 使用报告 line, a 汇总 row and the 说明 sheet.
 // ---------------------------------------------------------------------------
 
 /** The message src/customers.js addTag throws when Shopify answers with `body` (fetch is replaced: nothing leaves this process). */
@@ -1627,7 +1596,7 @@ async function addTagErrorMessage(body) {
   globalThis.fetch = async () => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
   initClient({ shop: 'teststore', apiVersion: '2026-07', token: 'token', log: memoryLog(), sleep: async () => {} });
   try {
-    await addTag(gid('Customer', 1), 'gift-card-sent-2026-10-R1');
+    await addTag(gid('Customer', 1), USED_TAG);
     return null;
   } catch (err) {
     return err.message;
@@ -1637,16 +1606,13 @@ async function addTagErrorMessage(body) {
   }
 }
 
-describe('excel per-round reminder tags', () => {
+describe('excel used-card tag', () => {
   let env;
   let paths;
   let selection;
   const amount = (n) => selection.recipients.find((r) => r.customerId === cust(n)).amountCents;
   const p2 = (n) => String(n).padStart(2, '0');
-  const T1 = 'gift-card-sent-2026-10-R1';
-  const T2 = 'gift-card-sent-2026-10-R2';
-  const SENT_BY_TAG = '已发（按 Shopify 上的本轮 tag 补记）';
-  const TAG_MISSING = '；本轮 tag 没打上，下次运行会补打';
+  const CONDITION = "customer_tags CONTAINS 'gift-card-sent-2026-10' AND NOT customer_tags CONTAINS 'gift-card-sent-2026-10-USED'";
 
   beforeEach(async () => {
     env = testConfig();
@@ -1675,7 +1641,7 @@ describe('excel per-round reminder tags', () => {
     }
     return out;
   }
-  /** 运行记录 rows of 汇总: [开始时间, 命令, 预演/实际, 批次/轮次, 数量上限, 退出码, 结束时间, 结果摘要]. */
+  /** 运行记录 rows of 汇总: [开始时间, 命令, 预演/实际, 批次, 数量上限, 退出码, 结束时间, 结果摘要]. */
   function runHistory(sum) {
     const rows = [];
     for (let r = findRow(sum, 1, '开始时间') + 1; r <= sum.rowCount; r += 1) {
@@ -1683,172 +1649,168 @@ describe('excel per-round reminder tags', () => {
     }
     return rows;
   }
-  /** The 操作日志 row (8 values) of customer `n`, action label `action` and reminder `round`, or null. */
-  function logRow(log, n, action, round) {
+  /** The 操作日志 row (8 values) of customer `n` and action label `action`, or null. */
+  function logRow(log, n, action) {
     for (let r = 2; r <= log.rowCount; r += 1) {
-      if (cellValue(log, r, 4) === String(n) && cellValue(log, r, 5) === action && cellValue(log, r, 3) === (round ? `第 ${round} 次提醒` : null)) return rowValues(log, r, 8);
+      if (cellValue(log, r, 4) === String(n) && cellValue(log, r, 5) === action) return rowValues(log, r, 8);
     }
     return null;
   }
-
-  /**
-   * Round 1 went out on 10/12, but the journal lost those lines (an older backup was put back);
-   * only c14's send with an unknown outcome survived. On 10/13 round 1 ran again: c1, c2 and c14
-   * carry the round-1 tag, so remind journalled remind.found for them and e-mailed none of them;
-   * c15 got his first round-1 email, but tagging him failed. On 10/16 round 2 (--limit 1): c2
-   * already carries the round-2 tag; c1 was sent and tagged.
-   */
-  function writeRoundTagJournal() {
+  /** 用卡 tag of customers `ns` in 发放名单. */
+  async function usedTagColumn(ns) {
+    const list = (await openBook(paths.excel)).getWorksheet('发放名单');
+    return ns.map((n) => cellValue(list, findRow(list, COL['客户 ID'], String(n)), COL['用卡 tag']));
+  }
+  /** c1, c2, c14, c15 issued (batch 1, 10/05). */
+  function writeIssued() {
     const R1 = '20261005160000-6';
-    const R2 = '20261012160000-6';
-    const R3 = '20261013170000-6';
-    const R4 = '20261016160000-6';
     const issued = (n, mm) => [
       [`2026-10-05T16:${p2(mm)}:01.000Z`, { op: 'create.start', cid: cust(n), amountCents: amount(n), batch: 1, run: R1 }],
       [`2026-10-05T16:${p2(mm)}:02.000Z`, { op: 'create.ok', cid: cust(n), giftCardId: card(1000 + n), last4: `x${n}`, amountCents: amount(n), batch: 1, run: R1 }],
       [`2026-10-05T16:${p2(mm)}:03.000Z`, { op: 'tag.ok', cid: cust(n), run: R1 }],
     ];
-    const options = (round) => ({ round, retryUnknown: false, retryFailed: false });
     journalAt(paths, [
       ['2026-10-05T16:00:00.000Z', { op: 'run.start', run: R1, command: 'issue', dryRun: false, batch: 1, limit: 20 }],
       ...issued(1, 1), ...issued(2, 2), ...issued(14, 3), ...issued(15, 4),
       ['2026-10-05T16:05:00.000Z', { op: 'run.end', run: R1, summary: issueEnd({ batch: 1, attempted: 4, created: 4, tagged: 4, seqFrom: 1, seqTo: 4 }), exitCode: 0 }],
-      // 10/12: what is left of the first round-1 run (no run.end)
-      ['2026-10-12T16:00:00.000Z', { op: 'run.start', run: R2, command: 'remind', dryRun: false, batch: null, limit: null, options: options(1) }],
-      ['2026-10-12T16:01:00.000Z', { op: 'remind.start', cid: cust(14), round: 1, giftCardId: card(1014), run: R2 }],
-      ['2026-10-12T16:01:30.000Z', { op: 'remind.unknown', cid: cust(14), round: 1, error: 'Network error calling Shopify: fetch failed', run: R2 }],
-      // 10/13: round 1 again
-      ['2026-10-13T17:00:00.000Z', { op: 'run.start', run: R3, command: 'remind', dryRun: false, batch: null, limit: null, options: options(1) }],
-      ['2026-10-13T17:00:05.000Z', { op: 'remind.found', cid: cust(1), round: 1, source: 'tag', run: R3 }],
-      ['2026-10-13T17:00:06.000Z', { op: 'remind.found', cid: cust(2), round: 1, source: 'tag', run: R3 }],
-      ['2026-10-13T17:00:07.000Z', { op: 'remind.found', cid: cust(14), round: 1, source: 'tag', run: R3 }],
-      ['2026-10-13T17:01:00.000Z', { op: 'remind.start', cid: cust(15), round: 1, giftCardId: card(1015), run: R3 }],
-      ['2026-10-13T17:01:01.000Z', { op: 'remind.ok', cid: cust(15), round: 1, run: R3 }],
-      ['2026-10-13T17:01:02.000Z', { op: 'remind.tag.fail', cid: cust(15), round: 1, error: 'tagsAdd rejected: tags: Tag limit reached [INVALID]', run: R3 }],
-      ['2026-10-13T17:02:00.000Z', { op: 'run.end', run: R3, summary: remindEnd({ eligible: 1, planned: 1, attempted: 1, sent: 1, alreadySentByTag: 3, roundTagFailed: 1 }), exitCode: 0 }],
-      // 10/16: round 2
-      ['2026-10-16T16:00:00.000Z', { op: 'run.start', run: R4, command: 'remind', dryRun: false, batch: null, limit: 1, options: options(2) }],
-      ['2026-10-16T16:00:05.000Z', { op: 'remind.found', cid: cust(2), round: 2, source: 'tag', run: R4 }],
-      ['2026-10-16T16:01:00.000Z', { op: 'remind.start', cid: cust(1), round: 2, giftCardId: card(1001), run: R4 }],
-      ['2026-10-16T16:01:01.000Z', { op: 'remind.ok', cid: cust(1), round: 2, run: R4 }],
-      ['2026-10-16T16:02:00.000Z', { op: 'run.end', run: R4, summary: remindEnd({ round: 2, eligible: 3, planned: 1, attempted: 1, sent: 1, alreadySentByTag: 1, roundTagged: 1 }), exitCode: 0 }],
+    ]);
+  }
+  /**
+   * 10/12: usage tags c1, c2's tagsAdd is refused. 10/13: usage again, c2 tagged on the retry, c14 (used
+   * meanwhile) refused with a lost answer.
+   */
+  function writeUsageRuns() {
+    const U1 = '20261012160000-6';
+    const U2 = '20261013170000-6';
+    journalAt(paths, [
+      ['2026-10-12T16:00:00.000Z', { op: 'run.start', run: U1, command: 'usage', dryRun: false, batch: null, limit: null, options: {} }],
+      ['2026-10-12T16:00:05.000Z', { op: 'used.tag.ok', cid: cust(1), giftCardId: card(1001), run: U1 }],
+      ['2026-10-12T16:00:06.000Z', { op: 'used.tag.fail', cid: cust(2), giftCardId: card(1002), error: 'tagsAdd rejected: tags: Tag limit reached [INVALID]', run: U1 }],
+      ['2026-10-12T16:01:00.000Z', { op: 'run.end', run: U1, summary: usageEnd({ issuedCards: 4, usedCards: 2, usedTagAdded: 1, usedTagFailed: 1 }), exitCode: 0 }],
+      ['2026-10-13T17:00:00.000Z', { op: 'run.start', run: U2, command: 'usage', dryRun: false, batch: null, limit: null, options: {} }],
+      ['2026-10-13T17:00:05.000Z', { op: 'used.tag.ok', cid: cust(2), giftCardId: card(1002), run: U2 }],
+      ['2026-10-13T17:00:06.000Z', { op: 'used.tag.fail', cid: cust(14), giftCardId: card(1014), error: 'Network error calling Shopify: fetch failed', run: U2 }],
+      ['2026-10-13T17:01:00.000Z', { op: 'run.end', run: U2, summary: usageEnd({ issuedCards: 4, usedCards: 3, usedTagged: 1, usedTagAdded: 1, usedTagFailed: 1 }), exitCode: 0 }],
     ]);
   }
 
-  test('remindLabel: a reminder found by its round tag, and a sent reminder whose round tag is missing (spec texts)', () => {
-    // the states foldJournal builds for remind.found (source 'tag') and remind.tag.fail (tagError), by hand
-    const found = { status: 'sent', at: null, startedAt: null, giftCardId: null, error: null, reason: null, source: 'tag', run: 'R3' };
-    assert.equal(remindLabel(found, null, TZ), SENT_BY_TAG);
-    assert.equal(SENT_BY_TAG, '已发（按 Shopify 上的本轮 tag 补记）');
-    assert.equal(remindLabel(found, 'remind', TZ), SENT_BY_TAG);
-    assert.equal(remindLabel({ ...found, at: '2026-10-13T17:00:05.000Z' }, null, TZ), SENT_BY_TAG, 'no send time: the journal never saw that send');
-    const sent = { status: 'sent', startedAt: '2026-10-12T16:04:59.000Z', at: '2026-10-12T16:05:00.000Z', giftCardId: card(1001), error: null, reason: null, run: 'R2' };
-    const tagError = 'tagsAdd rejected: tags: Tag limit reached';
-    assert.equal(remindLabel({ ...sent, tagError }, null, TZ), '已发 10-12 09:05；本轮 tag 没打上，下次运行会补打');
-    assert.equal(remindLabel({ ...found, tagError }, null, TZ), `${SENT_BY_TAG}${TAG_MISSING}`);
-    assert.equal(remindLabel({ ...sent, at: null, tagError }, null, TZ), `已发${TAG_MISSING}`);
-    assert.equal(remindLabel({ ...sent, tagError: '' }, null, TZ), `已发 10-12 09:05${TAG_MISSING}`, 'a failure without a message is still a failure');
-    // no tag problem
-    assert.equal(remindLabel(sent, null, TZ), '已发 10-12 09:05');
-    assert.equal(remindLabel({ ...sent, tagError: null }, null, TZ), '已发 10-12 09:05');
-    assert.equal(remindLabel({ ...sent, source: 'verify' }, null, TZ), '已发 10-12 09:05', 'only source "tag" means found by the round tag');
-    // a tagError only qualifies a sent reminder
-    assert.equal(remindLabel({ status: 'failed', error: 'boom', tagError }, null, TZ), '失败：boom');
-    assert.equal(remindLabel({ status: 'unknown', tagError }, null, TZ), '结果不明');
-    assert.equal(remindLabel({ status: 'skipped', reason: 'used', tagError }, null, TZ), '跳过：已用过卡');
-    assert.equal(remindLabel({ status: 'in_progress', tagError }, 'remind', TZ), '进行中');
-  });
-
-  test('roundTagName names the tags like src/remind.js roundTag: <SENT_TAG>-R<round>, one per round and campaign', () => {
-    assert.equal(roundTagName('OCT26RTPROMO', 1), 'OCT26RTPROMO-R1');
-    assert.equal(roundTagName('OCT26RTPROMO', 2), 'OCT26RTPROMO-R2');
-    assert.equal(roundTagName('OCT26RTPROMO-TEST', 1), 'OCT26RTPROMO-TEST-R1');
-    assert.equal(roundTagName('OCT26RTPROMO', '2'), 'OCT26RTPROMO-R2');
-    assert.equal(typeof remindModule.roundTag, 'function', 'src/remind.js exports roundTag(sentTag, round) (round-tag spec)');
-    for (const sentTag of ['OCT26RTPROMO', 'OCT26RTPROMO-TEST', env.config.sentTag]) {
-      for (const round of [1, 2]) assert.equal(roundTagName(sentTag, round), remindModule.roundTag(sentTag, round), `${sentTag} round ${round}`);
+  test('usedTagName / reminderSegmentCondition name the tag like src/usage.js: <SENT_TAG>-USED, per campaign', () => {
+    assert.equal(usedTagName('OCT26RTPROMO'), 'OCT26RTPROMO-USED');
+    assert.equal(usedTagName('OCT26RTPROMO-TEST2'), 'OCT26RTPROMO-TEST2-USED');
+    assert.equal(usedTagName(env.config.sentTag), USED_TAG);
+    assert.equal(reminderSegmentCondition('OCT26RTPROMO'), "customer_tags CONTAINS 'OCT26RTPROMO' AND NOT customer_tags CONTAINS 'OCT26RTPROMO-USED'");
+    for (const sentTag of ['OCT26RTPROMO', 'OCT26RTPROMO-TEST2', env.config.sentTag]) {
+      assert.equal(usedTagName(sentTag), usageUsedTagName(sentTag), sentTag);
+      assert.equal(reminderSegmentCondition(sentTag), usageSegmentCondition(sentTag), sentTag);
     }
   });
 
-  test('run summaries with the round-tag counters read as Chinese (live run, tag repair, dry run)', () => {
-    const cases = [
-      // the journal was lost after round 1: everyone carries the round tag, nobody is e-mailed again
-      [false, remindEnd({ alreadySentByTag: 3 }), '按 tag 认定已发 3'],
-      // a normal live run: each send tagged, one tagsAdd failed
-      [false, remindEnd({ eligible: 3, planned: 3, attempted: 3, sent: 3, roundTagged: 2, roundTagFailed: 1 }), '符合条件 3，本次要发 3，尝试 3，已发 3，打本轮 tag 2，打本轮 tag 失败 1'],
-      // the next live run tags the sent customers who are missing the tag
-      [false, remindEnd({ alreadySent: 3, roundTagFixed: 1 }), '之前已发 3，补打本轮 tag 1'],
-      [false, remindEnd({ alreadySent: 2, roundTagFixed: 1, roundTagFailed: 1 }), '之前已发 2，打本轮 tag 失败 1，补打本轮 tag 1'],
-      [false, remindEnd({ eligible: 1, planned: 1, alreadySent: 2, alreadySentByTag: 1, previouslyFailed: 1 }), '符合条件 1，本次要发 1，之前已发 2，按 tag 认定已发 1，之前失败 1'],
-      // a dry run reads the tags but only counts
-      [true, remindEnd({ dryRun: true, eligible: 2, planned: 2, alreadySentByTag: 1, roundTagMissing: 1 }), '符合条件 2，将发 2，按 tag 认定已发 1，缺本轮 tag 1'],
-      [true, remindEnd({ round: 2, dryRun: true, roundTagMissing: 4 }), '缺本轮 tag 4'],
-      // all counters at 0
-      [false, remindEnd({ round: 2 }), '各项都是 0'],
-    ];
-    for (const [dryRun, summary, expected] of cases) {
-      assert.equal(summaryText(summary, { command: 'remind', dryRun }), expected, JSON.stringify(summary));
-      assert.equal(summaryText(summary), expected, `(inferred) ${JSON.stringify(summary)}`);
-      assert.doesNotMatch(expected, /[a-z]+[A-Z]|\b(?:alreadySentByTag|roundTag\w*|true|false)\b/);
-    }
-  });
-
-  test('the errors a failed round tag journals (src/customers.js addTag) are shown in Chinese', async () => {
+  test('the errors a failed used tag journals (src/customers.js addTag) are shown in Chinese', async () => {
     const noPayload = await addTagErrorMessage({ data: { tagsAdd: null } });
     assert.equal(noPayload, 'tagsAdd returned no payload');
     assert.equal(errorText(noPayload), 'Shopify 没有返回结果');
     const refused = await addTagErrorMessage({ data: { tagsAdd: { node: null, userErrors: [{ field: ['tags'], message: 'Tag limit reached' }] } } });
     assert.equal(refused, 'tagsAdd rejected: tags: Tag limit reached');
     assert.equal(errorText(refused), 'Shopify 拒绝：tags: Tag limit reached');
-    // the other mutations' "no payload" messages read the same; other words are left alone
-    for (const op of ['giftCardCreate', 'giftCardSendNotificationToCustomer']) assert.equal(errorText(`${op} returned no payload`), 'Shopify 没有返回结果');
+    assert.equal(errorText('giftCardCreate returned no payload'), 'Shopify 没有返回结果');
     assert.equal(errorText('the request returned no payload'), 'the request returned no payload');
-    assert.equal(errorText(errorText(noPayload)), 'Shopify 没有返回结果');
   });
 
-  test('说明 and 汇总 name the campaign\'s round tags and say a customer carrying one is never reminded again that round', async () => {
+  test('发放名单 用卡 tag: from the journal (the latest outcome) or from usage.json; 操作日志 names the tag and the Chinese error; 运行记录 counts', async () => {
+    writeIssued();
+    writeUsageRuns();
+    await write();
+    // journal only (no usage.json): c1 and c2 tagged, c14 failed, c15 never used
+    assert.deepEqual(await usedTagColumn([1, 2, 14, 15]), ['是', '是', '否', '否']);
+    const wb = await openBook(paths.excel);
+    const log = wb.getWorksheet('操作日志');
+    assert.deepEqual(logRow(log, 1, '打用卡 tag'), [wall(2026, 10, 12, 9, 0, 5), 'usage', null, '1', '打用卡 tag', `已打 ${USED_TAG}`, '1001', null]);
+    assert.deepEqual(logRow(log, 2, '打用卡 tag 失败'), [wall(2026, 10, 12, 9, 0, 6), 'usage', null, '2', '打用卡 tag 失败', `${USED_TAG} 没打上，下次运行 usage 会再试`, '1002', 'Shopify 拒绝：tags: Tag limit reached（INVALID）']);
+    assert.deepEqual(logRow(log, 2, '打用卡 tag'), [wall(2026, 10, 13, 10, 0, 5), 'usage', null, '2', '打用卡 tag', `已打 ${USED_TAG}`, '1002', null]);
+    assert.deepEqual(logRow(log, 14, '打用卡 tag 失败').slice(5), [`${USED_TAG} 没打上，下次运行 usage 会再试`, '1014', '网络错误：fetch failed']);
+    const actions = Array.from({ length: log.actualRowCount - 1 }, (_, i) => cellValue(log, i + 2, 5));
+    assert.ok(actions.every((a) => !/^used\./.test(a)), `every op has a Chinese label: ${actions.join(', ')}`);
+    const sum = wb.getWorksheet('汇总');
+    assert.deepEqual(runHistory(sum).map((r) => [r[1], r[3], r[7]]), [
+      ['issue', '1', '尝试 4，建卡 4，打 tag 4，序号 1–4'],
+      ['usage', null, '发出的卡 4，已用的卡 2，新打用卡 tag 1，打用卡 tag 失败 1'],
+      ['usage', null, '发出的卡 4，已用的卡 3，已带用卡 tag 1，新打用卡 tag 1，打用卡 tag 失败 1'],
+    ]);
+    assert.equal(findRow(sum, 1, '已打用卡 tag（人）'), null, 'no usage.json: no usage block');
+
+    // usage.json: the customers Shopify shows with the tag count too (c14 was tagged by hand), the line uses the latest run's counters
+    const usage = usageFixture(amount);
+    usage.usedTag = { tag: USED_TAG, taggedCustomerIds: [cust(1), cust(2), cust(14)] };
+    writeJsonAtomic(paths.usage, usage);
+    await write();
+    assert.deepEqual(await usedTagColumn([1, 2, 14, 15]), ['是', '是', '是', '否']);
+    const wb2 = await openBook(paths.excel);
+    assert.equal(cellValue(wb2.getWorksheet('使用报告'), findRow(wb2.getWorksheet('使用报告'), 1, '带来订单') + 3, 1), '已打用卡 tag 3 人（本次新打 1，失败 1）');
+    assert.deepEqual(rowValues(wb2.getWorksheet('汇总'), findRow(wb2.getWorksheet('汇总'), 1, '已打用卡 tag（人）'), 3), ['已打用卡 tag（人）', 3, '本次新打 1，失败 1']);
+  });
+
+  test('an older usage.json without usedTag: the column follows the journal, the line counts the latest run (already tagged + added)', async () => {
+    writeIssued();
+    writeUsageRuns();
+    writeJsonAtomic(paths.usage, usageFixture(amount)); // usageFixture carries usedTag: remove it
+    const usage = usageFixture(amount);
+    delete usage.usedTag;
+    writeJsonAtomic(paths.usage, usage);
+    const result = await write();
+    assert.deepEqual(result.warnings, []);
+    assert.deepEqual(await usedTagColumn([1, 2, 14, 15]), ['是', '是', '否', '否']);
+    const report = (await openBook(paths.excel)).getWorksheet('使用报告');
+    assert.equal(cellValue(report, findRow(report, 1, '带来订单') + 3, 1), '已打用卡 tag 2 人（本次新打 1，失败 1）');
+  });
+
+  test('a usage.json without any usage run in the journal: zero counters; a usage.json about another campaign\'s tag is ignored with a warning', async () => {
+    writeIssued();
+    writeJsonAtomic(paths.usage, usageFixture(amount)); // usedTag: c1, c14
+    let result = await write();
+    assert.deepEqual(result.warnings, []);
+    assert.deepEqual(await usedTagColumn([1, 2, 14, 15]), ['是', '否', '是', '否']);
+    let report = (await openBook(paths.excel)).getWorksheet('使用报告');
+    assert.equal(cellValue(report, findRow(report, 1, '带来订单') + 3, 1), '已打用卡 tag 2 人（本次新打 0，失败 0）');
+
+    const foreign = usageFixture(amount);
+    foreign.usedTag = { tag: 'OCT26RTPROMO-USED', taggedCustomerIds: [cust(1), cust(14)] };
+    writeJsonAtomic(paths.usage, foreign);
+    result = await write();
+    assert.deepEqual(result.warnings, [`usage.json 记录的用卡 tag 是 "OCT26RTPROMO-USED"，不是本活动的 "${USED_TAG}"，“用卡 tag”列只按本地日志显示`]);
+    assert.deepEqual(await usedTagColumn([1, 2, 14, 15]), ['否', '否', '否', '否']);
+    report = (await openBook(paths.excel)).getWorksheet('使用报告');
+    assert.equal(cellValue(report, findRow(report, 1, '带来订单') + 3, 1), '已打用卡 tag 0 人（本次新打 0，失败 0）');
+  });
+
+  test('说明 explains the Shopify Email reminders with this campaign\'s tags and condition; no reminder command text anywhere', async () => {
     env.cleanup();
     env = testConfig({ SENT_TAG: 'OCT26RTPROMO' });
     paths = campaignPaths(env.config);
     selection = await selectionFixture(env.config, fixtureCustomers());
     await write();
     const wb = await openBook(paths.excel);
-
     const help = wb.getWorksheet('说明');
-    assert.ok(findRow(help, 1, '本轮 tag（每一轮每人最多一封提醒）'), 'its own section');
-    assert.equal(valueOf(help, '本轮 tag'), '第 1 次提醒是 OCT26RTPROMO-R1，第 2 次提醒是 OCT26RTPROMO-R2，两轮互不影响。每发出一封提醒，就给客户打上这一轮的 tag。');
-    const carrying = valueOf(help, '带本轮 tag 的人');
-    assert.match(carrying, /^每次运行 remind（预演也一样）都先查 Shopify 上带本轮 tag 的客户：他们一律算这一轮已发过，不会再发，加 --retry-unknown 或 --retry-failed 也不会。/);
-    assert.match(carrying, /所以即使本地日志丢失或被旧备份覆盖，这一轮也不会给同一个人再发一封；真实运行会把他们在本地日志里补记为“已发（按 Shopify 上的本轮 tag 补记）”。$/);
-    const repair = valueOf(help, '补打本轮 tag');
-    assert.match(repair, /^打本轮 tag 失败不影响已经发出的提醒（本地日志记着已发），“操作日志”里记一行“打本轮 tag 失败”。下次真实运行同一轮时会先补打；/);
-    assert.match(repair, /发出满 10 分钟、Shopify 上却查不到本轮 tag 的人（例如 tag 在后台被删掉）也会补打。补打成功，或发现 Shopify 上其实已带这个 tag，记一行“本轮 tag 已打上”。/);
-    assert.match(repair, /发提醒后直接打上 tag 的不单独记一行，只在运行记录里计数。$/);
-    // the reminder cells
-    assert.equal(valueOf(help, SENT_BY_TAG), '本地日志里这一轮没有“已发”的记录（例如日志丢失，或被更早的备份覆盖），但客户在 Shopify 上带着本轮 tag，所以算作这一轮已发，不会再发。发送时间不详。');
-    assert.equal(
-      valueOf(help, `已发 MM-DD HH:MM${TAG_MISSING}`),
-      '提醒已经发出，但给客户打本轮 tag 失败了：本地日志记着已发，这一轮不会再给他发。下次真实运行同一轮时会先补打这个 tag（见“补打本轮 tag”），补打成功后这里只显示“已发 MM-DD HH:MM”。',
-    );
-    assert.equal(valueOf(help, '已发 MM-DD HH:MM'), '已让 Shopify 重发礼品卡邮件，时间是店铺时间；发出后给客户打上本轮 tag（见“本轮 tag”）。每一轮每人最多一封。');
-    assert.equal(valueOf(help, '第 1 次提醒'), '见“提醒状态”。这一轮的 tag 是 OCT26RTPROMO-R1。');
-    assert.equal(valueOf(help, '第 2 次提醒'), '见“提醒状态”。这一轮的 tag 是 OCT26RTPROMO-R2。');
-    assert.equal(valueOf(help, '操作日志'), '每次写操作的记录（建卡、打 tag、跳过、提醒），按时间顺序。发提醒后直接打上本轮 tag 的不单独记一行，见“补打本轮 tag”。');
-    // every item the help points to exists
-    for (const item of ['本轮 tag', '补打本轮 tag', '已发 MM-DD HH:MM']) assert.ok(findRow(help, 1, item), item);
-
-    const sum = wb.getWorksheet('汇总');
-    assert.deepEqual([1, 2].map((n) => valueOf(sum, `第 ${n} 次提醒`, 9)), ['OCT26RTPROMO-R1', 'OCT26RTPROMO-R2']);
-    assert.equal(sum.getColumn(9).width, 24, 'room for the tag name');
-    assert.ok(
-      findRow(sum, 1, '提醒只发给已建卡、卡还没用过（余额等于原金额）、没停用没过期、仍订阅营销邮件的人；每一轮每人最多一封：发出后给客户打上本轮 tag，带本轮 tag 的人这一轮不会再发，即使本地日志丢失。跳过的人再次运行同一轮会重新判断。'),
-      'the note under the 提醒 table',
-    );
+    assert.ok(findRow(help, 1, '提醒邮件（Shopify Email）'), 'its own section');
+    assert.equal(valueOf(help, '怎么发'), '提醒邮件不再由程序发送，改用 Shopify Email。发提醒前先运行一次 usage，让用过卡的客户带上 OCT26RTPROMO-USED；然后在 Shopify Email 里用下面的收件人条件发送。');
+    assert.equal(valueOf(help, '收件人条件'), "customer_tags CONTAINS 'OCT26RTPROMO' AND NOT customer_tags CONTAINS 'OCT26RTPROMO-USED'");
+    const tag = valueOf(help, '用卡 tag', 2);
+    // the column help comes first (发放名单各列), the section item later: both name the tag
+    const items = [];
+    for (let r = 1; r <= help.rowCount; r += 1) if (cellValue(help, r, 1) === '用卡 tag') items.push(cellValue(help, r, 2));
+    assert.equal(items.length, 2);
+    assert.match(items[0], /^客户是否带 OCT26RTPROMO-USED：卡用过（余额小于面额）后，usage 给客户打上这个 tag，Shopify Email 的提醒收件人条件会排除带它的人（见“提醒邮件（Shopify Email）”）。/);
+    assert.match(items[0], /按本地日志（“操作日志”里的“打用卡 tag”）或最近一次 usage 从 Shopify 读到的带 tag 名单显示“是”，否则“否”。$/);
+    assert.equal(items[1], 'OCT26RTPROMO-USED：每次运行 usage（不受 DRY_RUN 影响）都先查 Shopify 上已带这个 tag 的客户，再给余额小于面额、还没带 tag 的卡主打上，“操作日志”里记一行“打用卡 tag”。打失败只警告，记一行“打用卡 tag 失败”，下次运行 usage 会再试。程序从不删 tag。');
+    assert.ok(tag);
+    assert.equal(valueOf(help, '操作日志'), '每次写操作的记录（建卡、打 tag、跳过、打用卡 tag），按时间顺序。');
+    assert.equal(valueOf(help, '汇总'), '活动参数、筛选漏斗、金额、发放进度、使用情况和运行记录。');
+    const cells = await allCells();
+    assert.deepEqual(cells.filter((t) => /remind|REMIND_\d_DATE|本轮 tag|第 \d 次提醒|-R[12]\b/.test(t)), []);
   });
 
-  test('a test campaign shows its own round tags (OCT26RTPROMO-TEST-R1 / -R2), never the real campaign\'s', async () => {
+  test('a test campaign shows its own used tag (OCT26RTPROMO-TEST2-USED), never the real campaign\'s', async () => {
     env.cleanup();
-    env = testConfig({ CAMPAIGN_ID: '2026-10-test', TEST_CUSTOMER_IDS: '1,2', SENT_TAG: 'OCT26RTPROMO-TEST' });
+    env = testConfig({ CAMPAIGN_ID: '2026-10-test2', TEST_CUSTOMER_IDS: '1,2', SENT_TAG: 'OCT26RTPROMO-TEST2' });
     paths = campaignPaths(env.config);
     writeJsonAtomic(paths.selection, buildTestSelection({
       config: env.config,
@@ -1857,127 +1819,27 @@ describe('excel per-round reminder tags', () => {
       createdAt: NOW_ISO,
       snapshot: { exportedAt: NOW_ISO, source: 'nodes', count: 2 },
     }));
-    const R = '20261012160000-4';
+    const U = '20261012160000-4';
     journalAt(paths, [
-      ['2026-10-12T16:00:00.000Z', { op: 'run.start', run: R, command: 'remind', dryRun: false, batch: null, limit: null, options: { round: 1 } }],
-      ['2026-10-12T16:00:01.000Z', { op: 'remind.found', cid: cust(1), round: 1, source: 'tag', run: R }],
-      ['2026-10-12T16:00:02.000Z', { op: 'remind.tag.fail', cid: cust(2), round: 2, error: 'Network error calling Shopify: fetch failed', run: R }],
-      ['2026-10-12T16:00:03.000Z', { op: 'run.end', run: R, summary: remindEnd({ alreadySentByTag: 1 }), exitCode: 0 }],
+      ['2026-10-12T16:00:00.000Z', { op: 'run.start', run: U, command: 'usage', dryRun: false, batch: null, limit: null, options: {} }],
+      ['2026-10-12T16:00:01.000Z', { op: 'used.tag.ok', cid: cust(1), giftCardId: card(7001), run: U }],
+      ['2026-10-12T16:00:02.000Z', { op: 'used.tag.fail', cid: cust(2), giftCardId: card(7002), error: 'Network error calling Shopify: fetch failed', run: U }],
+      ['2026-10-12T16:00:03.000Z', { op: 'run.end', run: U, summary: usageEnd({ issuedCards: 2, usedCards: 2, usedTagAdded: 1, usedTagFailed: 1 }), exitCode: 0 }],
     ]);
     await write();
     const wb = await openBook(paths.excel);
-    const sum = wb.getWorksheet('汇总');
-    assert.deepEqual([1, 2].map((n) => valueOf(sum, `第 ${n} 次提醒`, 9)), ['OCT26RTPROMO-TEST-R1', 'OCT26RTPROMO-TEST-R2']);
-    const notes = Array.from({ length: sum.rowCount }, (_, i) => cellValue(sum, i + 1, 1)).filter((v) => typeof v === 'string' && v.startsWith('提醒只发给'));
-    assert.deepEqual(notes, ['提醒只发给已建卡、卡还没用过（余额等于原金额）、没停用没过期的人（测试活动不看营销订阅状态）；每一轮每人最多一封：发出后给客户打上本轮 tag，带本轮 tag 的人这一轮不会再发，即使本地日志丢失。跳过的人再次运行同一轮会重新判断。']);
+    assert.deepEqual(await usedTagColumn([1, 2]), ['是', '否']);
     const help = wb.getWorksheet('说明');
-    assert.match(valueOf(help, '本轮 tag'), /^第 1 次提醒是 OCT26RTPROMO-TEST-R1，第 2 次提醒是 OCT26RTPROMO-TEST-R2，/);
-    assert.equal(valueOf(help, '第 2 次提醒'), '见“提醒状态”。这一轮的 tag 是 OCT26RTPROMO-TEST-R2。');
+    assert.equal(valueOf(help, '收件人条件'), "customer_tags CONTAINS 'OCT26RTPROMO-TEST2' AND NOT customer_tags CONTAINS 'OCT26RTPROMO-TEST2-USED'");
     const log = wb.getWorksheet('操作日志');
-    assert.deepEqual(logRow(log, 1, '按本轮 tag 补记已发', 1).slice(5, 6), ['Shopify 上已带 OCT26RTPROMO-TEST-R1']);
-    assert.deepEqual(logRow(log, 2, '打本轮 tag 失败', 2).slice(5), ['OCT26RTPROMO-TEST-R2 没打上，下次运行会补打', null, '网络错误：fetch failed']);
-    assert.deepEqual((await allCells()).filter((t) => /OCT26RTPROMO-R[12]/.test(t)), [], 'no cell names the real campaign\'s round tags');
+    assert.deepEqual(logRow(log, 1, '打用卡 tag').slice(5, 6), ['已打 OCT26RTPROMO-TEST2-USED']);
+    assert.deepEqual(logRow(log, 2, '打用卡 tag 失败').slice(5), ['OCT26RTPROMO-TEST2-USED 没打上，下次运行 usage 会再试', '7002', '网络错误：fetch failed']);
+    assert.deepEqual((await allCells()).filter((t) => /OCT26RTPROMO-USED|\bOCT26RTPROMO'/.test(t)), [], 'no cell names the real campaign\'s tags');
   });
 
-  test('操作日志 shows remind.found and remind.tag.fail (round, tag name, Chinese error); 运行记录 shows the round-tag counters', async () => {
-    writeRoundTagJournal();
-    // an entry without its run.start and without a round (still shown, as a reminder entry)
-    appendJournal(paths.journal, { op: 'remind.tag.fail', cid: cust(15), error: 'tagsAdd returned no payload', run: 'gone' }, { now: () => '2026-10-16T16:03:00.000Z' });
-    await write();
-    const wb = await openBook(paths.excel);
-
-    const log = wb.getWorksheet('操作日志');
-    assert.deepEqual(logRow(log, 1, '按本轮 tag 补记已发', 1), [wall(2026, 10, 13, 10, 0, 5), 'remind', '第 1 次提醒', '1', '按本轮 tag 补记已发', `Shopify 上已带 ${T1}`, null, null]);
-    assert.deepEqual(logRow(log, 14, '按本轮 tag 补记已发', 1), [wall(2026, 10, 13, 10, 0, 7), 'remind', '第 1 次提醒', '14', '按本轮 tag 补记已发', `Shopify 上已带 ${T1}`, null, null]);
-    assert.deepEqual(logRow(log, 15, '打本轮 tag 失败', 1), [wall(2026, 10, 13, 10, 1, 2), 'remind', '第 1 次提醒', '15', '打本轮 tag 失败', `${T1} 没打上，下次运行会补打`, null, 'Shopify 拒绝：tags: Tag limit reached（INVALID）']);
-    assert.deepEqual(logRow(log, 2, '按本轮 tag 补记已发', 2), [wall(2026, 10, 16, 9, 0, 5), 'remind', '第 2 次提醒', '2', '按本轮 tag 补记已发', `Shopify 上已带 ${T2}`, null, null]);
-    assert.deepEqual(logRow(log, 15, '打本轮 tag 失败', null), [wall(2026, 10, 16, 9, 3), 'remind', null, '15', '打本轮 tag 失败', '本轮 tag 没打上，下次运行会补打', null, 'Shopify 没有返回结果']);
-    const actions = Array.from({ length: log.actualRowCount - 1 }, (_, i) => cellValue(log, i + 2, 5));
-    assert.deepEqual(actions.filter((a) => /本轮 tag/.test(a)), ['按本轮 tag 补记已发', '按本轮 tag 补记已发', '按本轮 tag 补记已发', '打本轮 tag 失败', '按本轮 tag 补记已发', '打本轮 tag 失败']);
-    assert.ok(actions.every((a) => !/^remind\./.test(a)), `every op has a Chinese label: ${actions.join(', ')}`);
-
-    const sum = wb.getWorksheet('汇总');
-    assert.deepEqual(runHistory(sum).map((r) => [r[1], r[3], r[7]]), [
-      ['issue', '1', '尝试 4，建卡 4，打 tag 4，序号 1–4'],
-      ['remind', '第 1 次提醒', '没有正常结束（可能被中断）'],
-      ['remind', '第 1 次提醒', '符合条件 1，本次要发 1，尝试 1，已发 1，按 tag 认定已发 3，打本轮 tag 失败 1'],
-      ['remind', '第 2 次提醒', '符合条件 3，本次要发 1，尝试 1，已发 1，按 tag 认定已发 1，打本轮 tag 1'],
-    ]);
-    assert.deepEqual([1, 2].map((n) => valueOf(sum, `第 ${n} 次提醒`, 9)), [T1, T2]);
-  });
-
-  test('发放名单 and the 提醒 table count a reminder found by its round tag as sent, and flag a sent one whose round tag is missing', async () => {
-    // needs foldJournal's handling of remind.found (→ sent, source 'tag') and remind.tag.fail (→ tagError)
-    writeRoundTagJournal();
-    await write();
-    const wb = await openBook(paths.excel);
-
-    const list = wb.getWorksheet('发放名单');
-    const row = (n) => findRow(list, COL['客户 ID'], String(n));
-    const reminders = (n) => [cellValue(list, row(n), COL['第 1 次提醒']), cellValue(list, row(n), COL['第 2 次提醒'])];
-    assert.deepEqual(reminders(1), [SENT_BY_TAG, '已发 10-16 09:01'], 'round 1 from the tag; round 2 sent');
-    assert.deepEqual(reminders(2), [SENT_BY_TAG, SENT_BY_TAG], 'both rounds from the tags');
-    assert.deepEqual(reminders(14), [SENT_BY_TAG, null], 'the unknown send is settled by the tag, not sent again');
-    assert.deepEqual(reminders(15), [`已发 10-13 10:01${TAG_MISSING}`, null], 'sent, round tag missing');
-    assert.deepEqual(reminders(3), [null, null]);
-    // red marks a failed or unknown send only: these are all sent
-    for (const n of [1, 2, 14, 15]) assert.notEqual(list.getRow(row(n)).getCell(COL['第 1 次提醒']).font?.color?.argb, 'FFC00000', `customer ${n}`);
-
-    const sum = wb.getWorksheet('汇总');
-    assert.deepEqual(rowValues(sum, findRow(sum, 1, '第 1 次提醒'), 9), ['第 1 次提醒', wall(2026, 10, 12), 4, 0, 0, 0, 0, 0, T1]);
-    assert.deepEqual(rowValues(sum, findRow(sum, 1, '第 2 次提醒'), 9), ['第 2 次提醒', wall(2026, 10, 16), 2, 0, 0, 0, 0, 2, T2]);
-  });
-
-  test('the next live run\'s tag repair (remind.tag.ok) clears the flag; 操作日志 tells a repaired tag from one found in Shopify', async () => {
-    const R1 = '20261005160000-3';
-    const R2 = '20261012160000-3';
-    const R3 = '20261013170000-3';
-    journalAt(paths, [
-      ['2026-10-05T16:00:00.000Z', { op: 'run.start', run: R1, command: 'issue', dryRun: false, batch: 1, limit: 20 }],
-      ...[1, 15].flatMap((n, i) => [
-        [`2026-10-05T16:0${i + 1}:01.000Z`, { op: 'create.start', cid: cust(n), amountCents: amount(n), batch: 1, run: R1 }],
-        [`2026-10-05T16:0${i + 1}:02.000Z`, { op: 'create.ok', cid: cust(n), giftCardId: card(1000 + n), last4: `x${n}`, amountCents: amount(n), batch: 1, run: R1 }],
-        [`2026-10-05T16:0${i + 1}:03.000Z`, { op: 'tag.ok', cid: cust(n), run: R1 }],
-      ]),
-      ['2026-10-05T16:05:00.000Z', { op: 'run.end', run: R1, summary: issueEnd({ batch: 1, attempted: 2, created: 2, tagged: 2 }), exitCode: 0 }],
-      // 10/12: both sent; c1's tagsAdd answer was lost (Shopify had applied it), c15's was refused
-      ['2026-10-12T16:00:00.000Z', { op: 'run.start', run: R2, command: 'remind', dryRun: false, batch: null, limit: null, options: { round: 1 } }],
-      ['2026-10-12T16:01:00.000Z', { op: 'remind.start', cid: cust(1), round: 1, giftCardId: card(1001), run: R2 }],
-      ['2026-10-12T16:01:01.000Z', { op: 'remind.ok', cid: cust(1), round: 1, run: R2 }],
-      ['2026-10-12T16:01:02.000Z', { op: 'remind.tag.fail', cid: cust(1), round: 1, error: 'Network error calling Shopify: fetch failed', run: R2 }],
-      ['2026-10-12T16:02:00.000Z', { op: 'remind.start', cid: cust(15), round: 1, giftCardId: card(1015), run: R2 }],
-      ['2026-10-12T16:02:01.000Z', { op: 'remind.ok', cid: cust(15), round: 1, run: R2 }],
-      ['2026-10-12T16:02:02.000Z', { op: 'remind.tag.fail', cid: cust(15), round: 1, error: 'tagsAdd rejected: tags: Tag limit reached [INVALID]', run: R2 }],
-      ['2026-10-12T16:03:00.000Z', { op: 'run.end', run: R2, summary: remindEnd({ eligible: 2, planned: 2, attempted: 2, sent: 2, roundTagFailed: 2 }), exitCode: 0 }],
-    ]);
-    await write();
-    const cell = (ws, n) => cellValue(ws, findRow(ws, COL['客户 ID'], String(n)), COL['第 1 次提醒']);
-    let list = (await openBook(paths.excel)).getWorksheet('发放名单');
-    assert.deepEqual([1, 15].map((n) => cell(list, n)), [`已发 10-12 09:01${TAG_MISSING}`, `已发 10-12 09:02${TAG_MISSING}`]);
-
-    // 10/13: the next live run of round 1 finds c1 tagged after all, and tags c15 again
-    journalAt(paths, [
-      ['2026-10-13T17:00:00.000Z', { op: 'run.start', run: R3, command: 'remind', dryRun: false, batch: null, limit: null, options: { round: 1 } }],
-      ['2026-10-13T17:00:01.000Z', { op: 'remind.tag.ok', cid: cust(1), round: 1, note: 'already tagged in Shopify', run: R3 }],
-      ['2026-10-13T17:00:02.000Z', { op: 'remind.tag.ok', cid: cust(15), round: 1, run: R3 }],
-      ['2026-10-13T17:01:00.000Z', { op: 'run.end', run: R3, summary: remindEnd({ alreadySent: 2, roundTagFixed: 1 }), exitCode: 0 }],
-    ]);
-    await write();
-    const wb = await openBook(paths.excel);
-    list = wb.getWorksheet('发放名单');
-    assert.deepEqual([1, 15].map((n) => cell(list, n)), ['已发 10-12 09:01', '已发 10-12 09:02'], 'no longer flagged');
-
-    const log = wb.getWorksheet('操作日志');
-    assert.deepEqual(logRow(log, 1, '本轮 tag 已打上', 1), [wall(2026, 10, 13, 10, 0, 1), 'remind', '第 1 次提醒', '1', '本轮 tag 已打上', `Shopify 上已带 ${T1}`, null, null]);
-    assert.deepEqual(logRow(log, 15, '本轮 tag 已打上', 1), [wall(2026, 10, 13, 10, 0, 2), 'remind', '第 1 次提醒', '15', '本轮 tag 已打上', `已补打 ${T1}`, null, null]);
-    assert.deepEqual(logRow(log, 1, '打本轮 tag 失败', 1).slice(5), [`${T1} 没打上，下次运行会补打`, null, '网络错误：fetch failed']);
-    const sum = wb.getWorksheet('汇总');
-    assert.deepEqual(runHistory(sum).slice(1).map((r) => r[7]), ['符合条件 2，本次要发 2，尝试 2，已发 2，打本轮 tag 失败 2', '之前已发 2，补打本轮 tag 1']);
-  });
-
-  test('what src/remind.js really journals reads right: tag failures, the repair, then a journal put back to before round 1', async () => {
-    // Real live remind runs against the in-process fake Shopify (fetch replaced: nothing leaves
-    // this process); each run regenerates the workbook itself, as it does in production.
+  test('what src/usage.js really journals reads right: a tag added, one refused, then added on the next run', async () => {
+    // Real usage runs against the in-process fake Shopify (fetch replaced: nothing leaves this
+    // process); each run regenerates the workbook itself, as it does in production.
     env.cleanup();
     env = testConfig();
     paths = campaignPaths(env.config);
@@ -2002,40 +1864,37 @@ describe('excel per-round reminder tags', () => {
       ]),
       [issuedAt, { op: 'run.end', run: R, summary: issueEnd({ batch: 1, attempted: 3, created: 3, tagged: 3 }), exitCode: 0 }],
     ]);
-    const beforeRound1 = fs.readFileSync(paths.journal, 'utf8');
-    // round 1's tagsAdd calls, in send order: c1 tagged, c2 refused, c3 applied but its answer lost
-    const fake = installFakeShopify({ customers, giftCards, failures: { TagsAdd: [null, { kind: 'userError', message: 'Tag limit reached' }, { kind: 'appliedThenLost' }] }, now: () => Date.parse(issuedAt) });
+    // c1 and c2 used their cards; the first run's tagsAdd calls: c1 tagged, c2 refused
+    const fake = installFakeShopify({ customers, giftCards, failures: { TagsAdd: [null, { kind: 'userError', message: 'Tag limit reached' }] }, now: () => Date.parse(issuedAt) });
+    fake.spendCard(card(2001), 500);
+    fake.spendCard(card(2002), 100);
     const run = async (iso) => {
       const log = memoryLog();
-      const result = await remindModule.runRemind({ config: env.config, round: 1, log, now: () => new Date(iso), sleep: async () => {} });
+      const result = await runUsage({ config: env.config, log, now: () => new Date(iso), sleep: async () => {} });
       assert.equal(result.exitCode, 0, log.lines.join('\n'));
-      const wb = await openBook(paths.excel);
-      const list = wb.getWorksheet('发放名单');
-      const cells = [1, 2, 3].map((n) => cellValue(list, findRow(list, COL['客户 ID'], String(n)), COL['第 1 次提醒']));
-      return { wb, cells };
+      return { wb: await openBook(paths.excel), cells: await usedTagColumn([1, 2, 3]), log };
     };
     try {
-      let { wb, cells } = await run('2026-10-12T17:00:00Z');
-      assert.deepEqual(cells, ['已发 10-12 10:00', `已发 10-12 10:00${TAG_MISSING}`, `已发 10-12 10:00${TAG_MISSING}`]);
-      let log = wb.getWorksheet('操作日志');
-      assert.deepEqual(logRow(log, 2, '打本轮 tag 失败', 1).slice(5), [`${T1} 没打上，下次运行会补打`, null, 'Shopify 拒绝：input: Tag limit reached（INVALID）']);
-      assert.deepEqual(logRow(log, 3, '打本轮 tag 失败', 1).slice(5), [`${T1} 没打上，下次运行会补打`, null, '网络错误：fetch failed: socket hang up']);
+      let { wb, cells, log } = await run('2026-10-12T17:00:00Z');
+      assert.deepEqual(cells, ['是', '否', '否']);
+      assert.match(log.lines.join('\n'), /WARN   给客户 2 打 gift-card-sent-2026-10-USED 失败：tagsAdd rejected: input: Tag limit reached \[INVALID\]。下次运行 usage 会再试/);
+      let journal = wb.getWorksheet('操作日志');
+      assert.deepEqual(logRow(journal, 1, '打用卡 tag').slice(1, 6), ['usage', null, '1', '打用卡 tag', `已打 ${USED_TAG}`]);
+      assert.deepEqual(logRow(journal, 2, '打用卡 tag 失败').slice(5), [`${USED_TAG} 没打上，下次运行 usage 会再试`, '2002', 'Shopify 拒绝：input: Tag limit reached（INVALID）']);
+      let report = wb.getWorksheet('使用报告');
+      assert.equal(cellValue(report, findRow(report, 1, '带来订单') + 3, 1), '已打用卡 tag 1 人（本次新打 1，失败 1）');
+      assert.deepEqual(runHistory(wb.getWorksheet('汇总')).filter((r) => r[1] === 'usage').map((r) => r[7]), ['发出的卡 3，已用的卡 2，已用金额 $6.00，新打用卡 tag 1，打用卡 tag 失败 1']);
 
-      // 10/13, round 1 again: the repair (c2 tagged again, c3 found tagged after all), nobody e-mailed
+      // 10/13: the retry tags c2; c1 already carries the tag (Shopify's set), nothing is added for him again
       ({ wb, cells } = await run('2026-10-13T17:00:00Z'));
-      assert.deepEqual(cells, ['已发 10-12 10:00', '已发 10-12 10:00', '已发 10-12 10:00']);
-      log = wb.getWorksheet('操作日志');
-      assert.equal(logRow(log, 2, '本轮 tag 已打上', 1)[5], `已补打 ${T1}`);
-      assert.equal(logRow(log, 3, '本轮 tag 已打上', 1)[5], `Shopify 上已带 ${T1}`);
-
-      // 10/14: the journal is replaced by a copy from before round 1, and round 1 is run again
-      fs.writeFileSync(paths.journal, beforeRound1);
-      ({ wb, cells } = await run('2026-10-14T17:00:00Z'));
-      assert.deepEqual(cells, [SENT_BY_TAG, SENT_BY_TAG, SENT_BY_TAG]);
-      assert.equal(fake.state.calls.notify.length, 3, 'one round-1 email per person in all');
-      const sum = wb.getWorksheet('汇总');
-      assert.deepEqual(rowValues(sum, findRow(sum, 1, '第 1 次提醒'), 9), ['第 1 次提醒', wall(2026, 10, 12), 3, 0, 0, 0, 0, 0, T1]);
-      assert.deepEqual(runHistory(sum).filter((r) => r[1] === 'remind').map((r) => r[7]), ['按 tag 认定已发 3']);
+      assert.deepEqual(cells, ['是', '是', '否']);
+      assert.deepEqual(fake.opsNamed('TagsAdd').map((o) => o.variables.id), [cust(1), cust(2), cust(2)], 'one tagsAdd per customer per run, the retry included');
+      journal = wb.getWorksheet('操作日志');
+      assert.deepEqual(logRow(journal, 2, '打用卡 tag').slice(5), [`已打 ${USED_TAG}`, '2002', null]);
+      report = wb.getWorksheet('使用报告');
+      assert.equal(cellValue(report, findRow(report, 1, '带来订单') + 3, 1), '已打用卡 tag 2 人（本次新打 1，失败 0）');
+      assert.deepEqual(runHistory(wb.getWorksheet('汇总')).filter((r) => r[1] === 'usage').map((r) => r[7]).at(-1), '发出的卡 3，已用的卡 2，已用金额 $6.00，已带用卡 tag 1，新打用卡 tag 1');
+      assert.deepEqual(rowValues(wb.getWorksheet('汇总'), findRow(wb.getWorksheet('汇总'), 1, '已打用卡 tag（人）'), 3), ['已打用卡 tag（人）', 2, '本次新打 1，失败 0']);
     } finally {
       fake.restore();
     }
@@ -2052,41 +1911,9 @@ describe('excel helpers', () => {
     assert.equal(statusLabel('unknown'), '需人工核对');
     assert.equal(statusLabel('skipped'), '发放前跳过');
     assert.equal(statusLabel('in_progress', 'issue'), '进行中');
-    assert.equal(statusLabel('in_progress', 'remind'), '需人工核对');
+    assert.equal(statusLabel('in_progress', 'usage'), '需人工核对');
     assert.equal(statusLabel('in_progress', null), '需人工核对');
     assert.equal(effectiveStatus('in_progress', 'verify'), 'unknown');
-  });
-
-  test('remindLabel', () => {
-    assert.equal(remindLabel(undefined, null, TZ), '');
-    assert.equal(remindLabel({ status: 'sent', at: '2026-10-12T16:05:00.000Z' }, null, TZ), '已发 10-12 09:05');
-    assert.equal(remindLabel({ status: 'sent', at: '2026-12-01T17:00:00.000Z' }, null, TZ), '已发 12-01 09:00'); // PST
-    const skipped = {
-      'no-card': '没有卡',
-      'multiple-cards': '有多张卡',
-      'card-disabled': '卡已停用',
-      'card-expired': '卡已过期',
-      used: '已用过卡',
-      'customer-deleted': '客户已删除',
-      'no-email': '没有邮箱',
-      'not-subscribed': '未订阅营销邮件',
-    };
-    for (const [reason, label] of Object.entries(skipped)) assert.equal(remindLabel({ status: 'skipped', reason }, null, TZ), `跳过：${label}`);
-    assert.equal(remindLabel({ status: 'failed', error: 'boom' }, null, TZ), '失败：boom');
-    assert.equal(remindLabel({ status: 'unknown' }, 'remind', TZ), '结果不明');
-    assert.equal(remindLabel({ status: 'in_progress' }, 'remind', TZ), '进行中');
-    assert.equal(remindLabel({ status: 'in_progress' }, 'issue', TZ), '结果不明');
-    assert.equal(remindLabel({ status: 'in_progress' }, null, TZ), '结果不明');
-  });
-
-  test('store-local times are exact across daylight-saving changes', () => {
-    // 2026-11-01: PDT ends at 09:00Z; both instants are 01:30 local
-    assert.equal(remindLabel({ status: 'sent', at: '2026-11-01T08:30:00Z' }, null, TZ), '已发 11-01 01:30');
-    assert.equal(remindLabel({ status: 'sent', at: '2026-11-01T09:30:00Z' }, null, TZ), '已发 11-01 01:30');
-    // 2026-03-08: PDT starts at 10:00Z
-    assert.equal(remindLabel({ status: 'sent', at: '2026-03-08T09:30:00Z' }, null, TZ), '已发 03-08 01:30');
-    assert.equal(remindLabel({ status: 'sent', at: '2026-03-08T10:30:00Z' }, null, TZ), '已发 03-08 03:30');
-    assert.equal(remindLabel({ status: 'sent', at: '2026-10-12T16:05:00Z' }, null, 'Asia/Shanghai'), '已发 10-13 00:05');
   });
 
   test('adminUrl and numericId', () => {
@@ -2180,7 +2007,7 @@ describe('excel performance', () => {
       stats: { recipients: N, orderedCount: N * 0.75, neverCount: N * 0.25, totalCents: N * 1077, tiers: [] },
     };
     writeJsonAtomic(paths.selection, selection);
-    // journal: every recipient issued (start, ok, tag) and half of them reminded
+    // journal: every recipient issued (start, ok, tag) and half of them tagged as used
     const lines = [JSON.stringify({ t: '2026-10-05T16:00:00.000Z', op: 'run.start', run: 'R1', command: 'issue', dryRun: false, batch: 1, limit: N })];
     for (const r of recipients) {
       const t = '2026-10-05T16:30:00.000Z';
@@ -2188,8 +2015,7 @@ describe('excel performance', () => {
       lines.push(JSON.stringify({ t, op: 'create.ok', cid: r.customerId, giftCardId: gid('GiftCard', 2_000_000 + r.seq), last4: 'x123', amountCents: 1077, batch: 1, run: 'R1' }));
       lines.push(JSON.stringify({ t, op: 'tag.ok', cid: r.customerId, run: 'R1' }));
       if (r.seq % 2) {
-        lines.push(JSON.stringify({ t: '2026-10-12T16:00:00.000Z', op: 'remind.start', cid: r.customerId, round: 1, giftCardId: gid('GiftCard', 2_000_000 + r.seq), run: 'R2' }));
-        lines.push(JSON.stringify({ t: '2026-10-12T16:00:01.000Z', op: 'remind.ok', cid: r.customerId, round: 1, run: 'R2' }));
+        lines.push(JSON.stringify({ t: '2026-10-12T16:00:00.000Z', op: 'used.tag.ok', cid: r.customerId, giftCardId: gid('GiftCard', 2_000_000 + r.seq), run: 'R2' }));
       }
     }
     lines.push(JSON.stringify({ t: '2026-10-05T19:00:00.000Z', op: 'run.end', run: 'R1', summary: { created: N }, exitCode: 0 }));

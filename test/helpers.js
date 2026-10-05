@@ -108,8 +108,6 @@ export function testConfig(overrides = {}) {
     GIFT_CARD_TEMPLATE_SUFFIX: 'gift-card-promo',
     TIMEZONE: 'America/Los_Angeles',
     LAUNCH_DATE: '2026-10-05',
-    REMIND_1_DATE: '2026-10-12',
-    REMIND_2_DATE: '2026-10-16',
     GIFT_CARD_EXPIRES_ON: '2026-10-19',
     DRY_RUN: 'false',
     CAMPAIGNS_DIR: dir,
