@@ -210,8 +210,9 @@ test('the promo body: the image copy, every date from the card expiry, no amount
   assert.ok(promo.includes('You have an <strong>unused credit</strong> at <strong>LA Balloons</strong> waiting for you!'));
   assert.ok(promo.includes('It’s yours to use at <a href="https://www.laballoons.com">LABalloons.com</a>, but you must use it or lose it by <strong>October 19, 2026</strong>.'));
   assert.ok(promo.includes('Click below to claim your credit code before it\'s gone:'));
-  assert.equal(buttonText(byVariant.first.html), 'Claim My Credit Now');
-  assert.ok(promo.includes('** Promotional reward only. No cash value. Not redeemable for cash, non-transferable, valid only at <a href="https://www.laballoons.com">laballoons.com</a> &amp; expires 10/19/2026. **'));
+  assert.equal(buttonText(byVariant.first.html), 'CLAIM IT NOW');
+  assert.ok(!promo.includes('Promotional reward only'), 'the Promotional reward line was dropped (10/6)');
+  assert.ok(promo.includes('<span style="color: #FF2600; font-size: 12px">No cash value &amp; non-transferable.</span>'), 'red T&C sentence');
   assert.ok(promo.includes('No strings attached!'));
   assert.ok(promo.includes('We appreciate your business, and thank you for trusting us with your balloon and party supply needs!'));
   assert.ok(promo.includes('<p>- LA Balloons</p>'));
@@ -268,7 +269,7 @@ test('a card without an expiry date: the body sentences leave the date out; the 
   const email = emailOnly(read(r.file));
   assert.ok(email.includes('It’s yours to use at <a href="https://www.laballoons.com">LABalloons.com</a>.</p>'));
   assert.ok(!email.includes('use it or lose it'));
-  assert.ok(email.includes('valid only at <a href="https://www.laballoons.com">laballoons.com</a>. **'));
+  assert.ok(email.includes('will not be replaced.</p>'), 'the T&C ends without an expiry sentence');
   assert.ok(!email.includes('expires') && !email.includes('Expires on'));
   assert.equal(r.stage, 'promo');
 });
@@ -568,7 +569,7 @@ test('renderPreviewFor: expiresOn overrides GIFT_CARD_EXPIRES_ON; "" / null show
   assert.equal(r.subject, PROMO_SUBJECT);
   const email = emailOnly(read(r.file));
   assert.ok(email.includes('use it or lose it by <strong>October 26, 2026</strong>'));
-  assert.ok(email.includes('expires 10/26/2026. **') && email.includes('Expires on 10/26/2026.'));
+  assert.ok(email.includes('Expires on 10/26/2026.'));
   assert.ok(!email.includes('October 19') && !email.includes('10/19/2026'), 'not the .env date');
   assert.deepEqual(warnings(s.log), [`WARN ${SUBJECT_DATE_MISMATCH} 2026-10-26 不一致：请改 ${TEMPLATE_FILES.subject} 后重新贴到 Shopify 后台`]);
   s.log.lines.length = 0;

@@ -1,0 +1,86 @@
+{%- comment -%}
+  First reminder – Shopify Email code template (send on 2026-10-12).
+
+  How to use (Shopify admin → Marketing → Shopify Email → Create email → Code):
+    1. Run `node index.js usage` first, so customers who already used their card
+       carry the OCT26RTPROMO-USED tag and are left out.
+    2. Paste this whole file into the code editor (the editor wants a fragment:
+       no <!DOCTYPE>, <html>, <head> or <body>; Shopify wraps it).
+    3. Right-hand panel:
+         To            segment: customer_tags CONTAINS 'OCT26RTPROMO' AND NOT customer_tags CONTAINS 'OCT26RTPROMO-USED'
+         Subject       ⏰ TIME IS RUNNING OUT: Your LA Balloons CASH expires Oct. 19th!
+         Preview text  If you don't use your credit at LABalloons.com by October 19, 2026, you lose it.
+    4. "Send test" to yourself, then schedule or send.
+
+  Shopify Email has no gift_card variables, so this email cannot link to the
+  card page; a customer who lost the code is told to reply.
+  Dates are written out by hand (10/19/2026) – change them here if the expiry
+  date changes. Templates must include {{ unsubscribe_link }} (it renders the
+  unsubscribe link itself) and {{ open_tracking_block }}; both are at the end.
+  The first name is cut at "(" because some accounts carry a note in it.
+{%- endcomment -%}
+{%- assign promo_name = '' -%}
+{%- if customer.first_name != blank -%}{%- assign promo_name = customer.first_name | split: '(' | first | strip -%}{%- endif -%}
+<table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: #f7f7f7;">
+  <tr>
+    <td align="center" style="padding: 24px 12px;">
+      <table width="600" cellpadding="0" cellspacing="0" border="0" style="max-width: 600px; width: 100%; background-color: #ffffff; border: 1px solid #e5e5e5;">
+
+        <!-- Header -->
+        <tr>
+          <td align="center" style="padding: 32px 24px 16px 24px; font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif;">
+
+          </td>
+        </tr>
+
+        <!-- Body -->
+        <tr>
+          <td style="padding: 8px 40px 24px 40px; font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif; font-size: 16px; line-height: 1.5; color: #333333; text-align: left;">
+            <p style="margin: 0 0 16px 0;">Hello{% if promo_name != '' %} {{ promo_name }}{% endif %},</p>
+            <p style="margin: 0 0 16px 0;">This is a friendly reminder: you still have an <strong>unused credit</strong> at <strong>LA Balloons</strong>!</p>
+            <p style="margin: 0 0 24px 0;">Time is running out, and if you don&rsquo;t use it at <a href="{{ shop.url }}" style="color: #1990C6;">LABalloons.com</a> by <strong>October 19, 2026,</strong> you lose it.</p>
+
+            <!-- Button -->
+            <table cellpadding="0" cellspacing="0" border="0" align="center" style="margin: 0 auto 24px auto;">
+              <tr>
+                <td align="center" style="background-color: #1990C6; border-radius: 4px;">
+                  <a href="{{ shop.url }}" style="display: inline-block; padding: 16px 28px; font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif; font-size: 16px; font-weight: bold; color: #ffffff; text-decoration: none;">Shop Now at LABalloons.com</a>
+                </td>
+              </tr>
+            </table>
+
+            <p style="margin: 0 0 24px 0;">Can&rsquo;t find your credit code? Just reply to this email and we&rsquo;ll send it again.</p>
+            <p style="margin: 0 0 24px 0;">Shop now before it&rsquo;s too late!</p>
+            <p style="margin: 0 0 24px 0;">We appreciate your business, and thank you for trusting us with your balloon and party supply needs!</p>
+            <p style="margin: 0 0 24px 0;">Your support means the world to our team.</p>
+            <p style="margin: 0 0 24px 0;">- LA Balloons</p>
+            <p style="margin: 0; font-size: 12px; line-height: 1.5;"><strong>** Terms &amp; Conditions:</strong><br>
+            This voucher is distributed entirely for free as part of a temporary marketing promotion; no monetary value or thing of value was paid in exchange for it. <span style="color: #FF2600;">No cash value &amp; non-transferable.</span> Valid only for merchandise online at <a href="{{ shop.url }}" style="color: #1990C6;">www.laballoons.com</a>. This code cannot be redeemed for cash, and is explicitly exempt from California&rsquo;s mandatory gift certificate cash-out regulations. Lost, deleted, or stolen promotional codes will not be replaced. Expires on 10/19/2026.</p>
+          </td>
+        </tr>
+
+        <!-- Footer -->
+        <tr>
+          <td align="center" style="padding: 24px 40px 32px 40px; border-top: 1px solid #e5e5e5; font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif; font-size: 13px; line-height: 1.6; color: #777777;">
+            <p style="margin: 0 0 16px 0;">If you have any questions, reply to this email or contact us at <a href="mailto:Help@LABalloons.com" style="color: #1990C6;">Help@LABalloons.com</a></p>
+            <p style="margin: 0 0 8px 0;"><strong>Follow Us:</strong></p>
+            <p style="margin: 0 0 16px 0;">
+              <a href="https://www.instagram.com/l.a.balloons/"><img src="https://cdn.shopify.com/s/files/1/0006/2196/9471/files/laballoons_instragram.gif?v=1607165260" width="50" height="50" alt="Instagram" style="border: 0;"></a>
+              <a href="https://www.facebook.com/LABalloons/"><img src="https://cdn.shopify.com/s/files/1/0006/2196/9471/files/laballoons_facebook.gif?v=1607165274" width="50" height="50" alt="Facebook" style="border: 0;"></a>
+              <a href="https://www.pinterest.com/laballoons/_shop/"><img src="https://cdn.shopify.com/s/files/1/0006/2196/9471/files/laballoons_pinterest.gif?v=1607165287" width="50" height="50" alt="Pinterest" style="border: 0;"></a>
+              <a href="https://www.youtube.com/channel/UCncB_WqAl-TZ2F4eEmcxl-A/playlists"><img src="https://cdn.shopify.com/s/files/1/0006/2196/9471/files/laballoons_youtube.gif?v=1607165301" width="50" height="50" alt="YouTube" style="border: 0;"></a>
+            </p>
+            <p style="margin: 0 0 8px 0;"><strong>LA Balloons</strong><br>
+            1422 Gardena Ave., Glendale, CA 91204<br>
+            1-818-246-9404<br>
+            <a href="mailto:Help@LABalloons.com" style="color: #1990C6;">Help@LABalloons.com</a></p>
+            <p style="margin: 0 0 8px 0;">&copy; <a href="{{ shop.url }}" style="color: #1990C6;">LABalloons.com</a></p>
+
+<p style="margin: 0;">You received this email because you are subscribed to LA Balloons marketing emails. {{ unsubscribe_link }}</p>
+          </td>
+        </tr>
+      </table>
+      {{ open_tracking_block }}
+    </td>
+  </tr>
+</table>
