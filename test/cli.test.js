@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { parseCommand, UsageError, USAGE, COMMANDS, PREVIEW_VARIANTS } from '../src/cli.js';
+import { parseCommand, UsageError, USAGE, COMMANDS, PREVIEW_VARIANTS, ISSUE_GROUPS } from '../src/cli.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -12,11 +12,13 @@ test('cli: every command and its options', () => {
   assert.deepEqual(parseCommand(['check']), { command: 'check' });
   assert.deepEqual(parseCommand(['select']), { command: 'select', refresh: false });
   assert.deepEqual(parseCommand(['select', '--refresh']), { command: 'select', refresh: true });
-  assert.deepEqual(parseCommand(['issue']), { command: 'issue', limit: undefined, retryFailed: false, repairOnly: false });
-  assert.deepEqual(parseCommand(['issue', '--limit', '20']), { command: 'issue', limit: 20, retryFailed: false, repairOnly: false });
-  assert.deepEqual(parseCommand(['issue', '--limit=500', '--retry-failed']), { command: 'issue', limit: 500, retryFailed: true, repairOnly: false });
-  assert.deepEqual(parseCommand(['issue', '--repair-only']), { command: 'issue', limit: undefined, retryFailed: false, repairOnly: true });
-  assert.deepEqual(parseCommand(['issue', '--repair-only', '--limit', '5']), { command: 'issue', limit: 5, retryFailed: false, repairOnly: true });
+  assert.deepEqual(parseCommand(['issue']), { command: 'issue', group: null, limit: undefined, retryFailed: false, repairOnly: false });
+  assert.deepEqual(parseCommand(['issue', '--group', 'ordered', '--limit', '20']), { command: 'issue', group: 'ordered', limit: 20, retryFailed: false, repairOnly: false });
+  assert.deepEqual(parseCommand(['issue', '--group=never', '--limit=500', '--retry-failed']), { command: 'issue', group: 'never', limit: 500, retryFailed: true, repairOnly: false });
+  assert.deepEqual(parseCommand(['issue', '--group', 'ORDERED']).group, 'ordered', 'group names are not case sensitive');
+  assert.deepEqual(parseCommand(['issue', '--repair-only']), { command: 'issue', group: null, limit: undefined, retryFailed: false, repairOnly: true });
+  assert.deepEqual(parseCommand(['issue', '--repair-only', '--limit', '5']), { command: 'issue', group: null, limit: 5, retryFailed: false, repairOnly: true });
+  assert.deepEqual(ISSUE_GROUPS, ['ordered', 'never']);
   assert.deepEqual(parseCommand(['usage']), { command: 'usage' });
   assert.deepEqual(parseCommand(['verify']), { command: 'verify' });
   assert.deepEqual(parseCommand(['export']), { command: 'export', refresh: false, out: null });
@@ -32,6 +34,8 @@ test('cli: usage errors', () => {
   const usage = (argv, re, why) => assert.throws(() => parseCommand(argv), (err) => err instanceof UsageError && re.test(err.message), why);
   usage(['bogus'], /未知命令 "bogus"/);
   usage(['issue', '--limit', '0'], /--limit 必须是正整数/);
+  usage(['issue', '--group', 'both'], /^--group 只能是 ordered（有下单的客户）或 never（从没下单的客户），收到 "both"$/);
+  usage(['issue', '--group', ''], /--group 只能是/);
   usage(['issue', '--limit=-5'], /--limit 必须是正整数/);
   usage(['issue', '--limit', '2.5'], /--limit 必须是正整数/);
   usage(['issue', '--limit', '20abc'], /--limit 必须是正整数/);
@@ -55,14 +59,19 @@ test('cli: usage errors', () => {
 
 test('cli: USAGE lists issue --repair-only, and index.js hands it to runIssue', () => {
   const issueUsage = USAGE.slice(USAGE.indexOf('  issue '), USAGE.indexOf('  usage '));
-  assert.match(issueUsage, /^ {2}issue \[--limit N\] \[--retry-failed\] \[--repair-only\]$/m);
-  assert.match(issueUsage, /--repair-only 只补记和补打 tag，不建新卡（不需要 --limit）/);
+  assert.match(issueUsage, /^ {2}issue --group ordered\|never \[--limit N\] \[--retry-failed\] \[--repair-only\]$/m);
+  assert.match(issueUsage, /--group ordered 只发 A 组（有下单的客户），从 LAUNCH_DATE 起/);
+  assert.match(issueUsage, /--group never {3}只发 B 组（从没下单的客户），从 LAUNCH_DATE_NEVER 起/);
+  assert.match(issueUsage, /--repair-only 只补记和补打 tag，不建新卡（不需要 --limit 和 --group）/);
+  assert.match(USAGE, /第一次提醒（只发 A 组）：customer_tags CONTAINS '<SENT_TAG>-ORDERED' AND NOT customer_tags CONTAINS '<SENT_TAG>-USED'/);
+  assert.match(USAGE, /第二次提醒（两组一起）：customer_tags CONTAINS '<SENT_TAG>' AND NOT customer_tags CONTAINS '<SENT_TAG>-USED'/);
   // index.js cannot be run here (it reads the real .env), so its wiring is checked in the source.
   const index = fs.readFileSync(path.join(ROOT, 'index.js'), 'utf8');
   const call = index.slice(index.indexOf('runIssue({'), index.indexOf('})', index.indexOf('runIssue({')));
   assert.match(call, /repairOnly: args\.repairOnly/);
   assert.match(call, /retryFailed: args\.retryFailed/);
   assert.match(call, /limit: args\.limit/);
+  assert.match(call, /group: args\.group/);
 });
 
 test('cli: no remind command anywhere; USAGE explains the Shopify Email reminders and lists two preview variants', () => {

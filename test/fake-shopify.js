@@ -172,9 +172,11 @@ export function installFakeShopify({
       }
       case 'TaggedCustomers': {
         const tag = /tag:"((?:[^"\\]|\\.)*)"/.exec(variables.query)?.[1]?.replace(/\\(.)/g, '$1') ?? '';
-        const matching = state.customers.filter((c) => c.tags.some((t) => t.toLowerCase() === tag.toLowerCase()));
+        // Like the real store: tag:"X" also matches customers whose tag merely starts with X
+        // (X-TEST7, X-USED). The caller has to look at the tags it gets back.
+        const matching = state.customers.filter((c) => c.tags.some((t) => t.toLowerCase().startsWith(tag.toLowerCase())));
         const { slice, pageInfo } = page(matching, variables.after, variables.first ?? 250);
-        return graphql({ customers: { edges: slice.map((c) => ({ node: { id: c.id } })), pageInfo } });
+        return graphql({ customers: { edges: slice.map((c) => ({ node: { id: c.id, tags: [...c.tags] } })), pageInfo } });
       }
       case 'FindCampaignCards': {
         const since = /created_at:>='([^']+)'/.exec(variables.query)?.[1];

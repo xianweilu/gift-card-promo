@@ -679,7 +679,7 @@ test('used cards: their customers get "<SENT_TAG>-USED" once; the journal, the c
   assert.deepEqual(readUsageFile(paths.usage).usedTag, usage.usedTag);
 
   // Console: what the step does and the Shopify Email condition, then the counts.
-  assert.match(output(), new RegExp(`INFO 正在给用过卡（余额小于面额）的客户打 tag ${USED_TAG}（不受 DRY_RUN 影响）。提醒邮件用 Shopify Email 发送，收件人条件：customer_tags CONTAINS 'gift-card-sent-2026-10' AND NOT customer_tags CONTAINS '${USED_TAG}'`));
+  assert.match(output(), new RegExp(`INFO 正在给用过卡（余额小于面额）的客户打 tag ${USED_TAG}（不受 DRY_RUN 影响）。提醒邮件用 Shopify Email 发送，收件人条件：第一次提醒（只发 A 组）customer_tags CONTAINS 'gift-card-sent-2026-10-ORDERED' AND NOT customer_tags CONTAINS '${USED_TAG}'；第二次提醒（两组一起）customer_tags CONTAINS 'gift-card-sent-2026-10' AND NOT customer_tags CONTAINS '${USED_TAG}'`));
   assert.match(output(), new RegExp(`INFO   已打用卡 tag ${USED_TAG}：5 人（之前已带 0，本次新打 5，失败 0）`));
   // run.end
   const end = readJournal(paths.journal).at(-1);

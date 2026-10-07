@@ -57,18 +57,26 @@ for (const [name, template] of Object.entries(TEMPLATES)) {
     assert.ok(body.includes('October 19, 2026'));
     assert.ok(body.includes('Expires on 10/19/2026.'));
     // Where the code is, and no gift-card page button.
-    assert.ok(body.includes('Can&rsquo;t find your credit code? Just reply to this email and we&rsquo;ll send it again.'));
-    // Dropped on 10/6: the 'code was sent on October 5' line, the Cha-Ching tip, the Promotional reward line, 'No strings attached'.
-    for (const gone of ['Your credit code was sent', 'Cha-Ching', 'Promotional reward only', 'No strings attached', 'Balloon Math']) {
+    assert.match(body, /Just reply to this email and we&rsquo;ll send (your code|it) again/);
+    // Dropped on 10/6: the Cha-Ching tip, the Promotional reward line, 'No strings attached'.
+    for (const gone of ['Cha-Ching', 'Promotional reward only', 'No strings attached', 'Balloon Math']) {
       assert.ok(!body.includes(gone), `should be gone: ${gone}`);
     }
     // 'We appreciate…' and 'Your support…' are separate paragraphs.
     assert.ok(/needs!<\/p>\s*<p[^>]*>Your support means the world to our team\.<\/p>/.test(body), 'two paragraphs');
+    // The T&C: one size smaller than the body, and the whole paragraph in the text colour (no red sentence).
+    assert.ok(body.includes('<p style="margin: 0; font-size: 10px; line-height: 1.5;"><strong>** Terms &amp; Conditions:</strong><br>'));
+    assert.ok(body.includes('paid in exchange for it. No cash value &amp; non-transferable. Valid only for merchandise online at'));
+    assert.doesNotMatch(body, /FF2600|color: *red/i);
     assert.ok(body.includes('Shop Now at LABalloons.com'));
     assert.doesNotMatch(body, /Claim My Credit|View your Online Credit Code/);
 
     // The paste-in instructions at the top.
-    assert.ok(template.includes("customer_tags CONTAINS 'OCT26RTPROMO' AND NOT customer_tags CONTAINS 'OCT26RTPROMO-USED'"));
+    // The first reminder goes to the ordered group only (its group tag); the second to everyone.
+    const segment = name === 'remind1'
+      ? "customer_tags CONTAINS 'OCT26RTPROMO-ORDERED' AND NOT customer_tags CONTAINS 'OCT26RTPROMO-USED'"
+      : "customer_tags CONTAINS 'OCT26RTPROMO' AND NOT customer_tags CONTAINS 'OCT26RTPROMO-USED'";
+    assert.ok(template.includes(`segment: ${segment}`), segment);
     assert.ok(template.includes('Subject'));
     assert.ok(template.includes('Preview text'));
   });
@@ -99,13 +107,14 @@ test('the first reminder follows the approved copy (10/6 image)', () => {
     'This is a friendly reminder: you still have an <strong>unused credit</strong> at <strong>LA Balloons</strong>!',
     'Time is running out, and if you don&rsquo;t use it at <a href="{{ shop.url }}" style="color: #1990C6;">LABalloons.com</a> by <strong>October 19, 2026,</strong> you lose it.',
     'Shop Now at LABalloons.com',
-    'Can&rsquo;t find your credit code? Just reply to this email and we&rsquo;ll send it again.',
+    // The sent-on line and the 'can't find it' line share one paragraph (no gap between them).
+    'Your credit code was sent to your email on October 7, 2026.<br>\n            Can&rsquo;t find it? Just reply to this email and we&rsquo;ll send your code again.</p>',
     'Shop now before it&rsquo;s too late!',
     'We appreciate your business, and thank you for trusting us with your balloon and party supply needs!',
     'Your support means the world to our team.',
     '- LA Balloons',
     '<strong>** Terms &amp; Conditions:</strong>',
-    'paid in exchange for it. <span style="color: #FF2600;">No cash value &amp; non-transferable.</span> Valid only for merchandise online at',
+    'paid in exchange for it. No cash value &amp; non-transferable. Valid only for merchandise online at',
     'Expires on 10/19/2026.',
   ];
   let at = 0;
@@ -114,10 +123,35 @@ test('the first reminder follows the approved copy (10/6 image)', () => {
     assert.ok(i >= 0, `missing or out of order: ${text}`);
     at = i + text.length;
   }
-  for (const gone of ['Just a friendly reminder', 'Your credit code was sent']) {
+  for (const gone of ['Just a friendly reminder', 'October 5, 2026']) {
     assert.ok(!body.includes(gone), `should be gone: ${gone}`);
   }
   assert.ok(TEMPLATES.remind1.includes('Subject       ⏰ TIME IS RUNNING OUT: Your LA Balloons CASH expires Oct. 19th!'));
+});
+
+test('the second reminder follows the approved copy (10/6 image)', () => {
+  const body = withoutComments(TEMPLATES.remind2);
+  const order = [
+    '<strong>This is your final reminder:</strong> your <strong>unused credit</strong> at <strong>LA Balloons</strong> expires on <strong>October 19, 2026!</strong></p>',
+    'After that, the credit disappears for good.<br>\n            Don&rsquo;t let your money go to waste &mdash; spend it at <a href="{{ shop.url }}" style="color: #1990C6;">LABalloons.com</a> today!</p>',
+    'Shop Now at LABalloons.com',
+    'Can&rsquo;t find your credit code?<br>\n            Just reply to this email and we&rsquo;ll send it again!</p>',
+    'We appreciate your business, and thank you for trusting us with your balloon and party supply needs!</p>',
+    'Your support means the world to our team.</p>',
+    '- LA Balloons</p>',
+    '<strong>** Terms &amp; Conditions:</strong>',
+    'paid in exchange for it. No cash value &amp; non-transferable. Valid only for merchandise online at',
+    'Expires on 10/19/2026.',
+  ];
+  let at = 0;
+  for (const text of order) {
+    const i = body.indexOf(text, at);
+    assert.ok(i >= 0, `missing or out of order: ${text}`);
+    at = i + text.length;
+  }
+  for (const gone of ['only a few days away', 'October 19th', 'Your credit code was sent', 'Time is running out']) {
+    assert.ok(!body.includes(gone), `should be gone: ${gone}`);
+  }
 });
 
 test('the two reminders differ in urgency but share the T&C body', () => {

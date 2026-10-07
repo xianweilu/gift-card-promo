@@ -212,11 +212,17 @@ test('the promo body: the image copy, every date from the card expiry, no amount
   assert.ok(promo.includes('Click below to claim your credit code before it\'s gone:'));
   assert.equal(buttonText(byVariant.first.html), 'CLAIM IT NOW');
   assert.ok(!promo.includes('Promotional reward only'), 'the Promotional reward line was dropped (10/6)');
-  assert.ok(promo.includes('<span style="color: #FF2600; font-size: 12px">No cash value &amp; non-transferable.</span>'), 'red T&C sentence');
+  // The T&C: one tiny paragraph (8px, heading and link the same size), the sentence in the text colour;
+  // the two sign-off lines above it get extra room.
+  assert.ok(promo.includes('<p style="margin: 0 0 28px 0;">Your support means the world to our team.</p>\n<p style="margin: 0 0 28px 0;">- LA Balloons</p>'));
+  assert.ok(promo.includes('<p style="margin: 0; font-size: 8px; line-height: 1.5;"><strong style="font-size: 8px;">** Terms &amp; Conditions:</strong><br>'));
+  assert.ok(promo.includes('<a href="https://www.laballoons.com" style="font-size: 8px;">www.laballoons.com</a>'));
+  assert.ok(promo.includes('paid in exchange for it. No cash value &amp; non-transferable. Valid only for merchandise online at'));
+  assert.doesNotMatch(promo, /FF2600|<div style="font-weight: bold">/);
   assert.ok(promo.includes('No strings attached!'));
   assert.ok(promo.includes('We appreciate your business, and thank you for trusting us with your balloon and party supply needs!'));
-  assert.ok(promo.includes('<p>- LA Balloons</p>'));
-  assert.ok(promo.includes('** Terms &amp; Conditions:'));
+  assert.ok(promo.includes('>- LA Balloons</p>'));
+  assert.ok(promo.includes('** Terms &amp; Conditions:</strong>'));
   assert.ok(promo.includes('exempt from California’s mandatory gift certificate cash-out regulations'));
   assert.ok(promo.includes('Expires on 10/19/2026.'));
   assert.ok(!promo.includes('$15.33') && !promo.includes('15.33'), 'the promo copy never shows the amount');

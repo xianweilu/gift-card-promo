@@ -25,7 +25,8 @@ export function selectionParams(config, { timezone, cutoffMs, cutoffIso }) {
     giftCardNote: config.giftCardNote,
     giftCardTemplateSuffix: config.giftCardTemplateSuffix,
     giftCardExpiresOn: config.giftCardExpiresOn,
-    launchDate: config.launchDate,
+    launchDate: config.launchDate, // the ordered group's day (issue --group ordered)
+    launchDateNever: config.launchDateNever, // the never-ordered group's day (issue --group never)
     // Older selection.json files may also carry remind1Date / remind2Date; nothing reads them.
     testGiftAmountCents: config.testCustomerIds.length ? config.testGiftAmountCents : null,
   };

@@ -19,7 +19,8 @@ import { runUsage } from '../src/usage.js';
 import { runVerify } from '../src/verify.js';
 import { runExport } from '../src/export-command.js';
 
-const { config, dir, cleanup } = testConfig({ SENT_TAG: 'OCT26RTPROMO' });
+// Two groups on two days: the customers who have ordered on 10/7, those who never have on 10/12.
+const { config, dir, cleanup } = testConfig({ SENT_TAG: 'OCT26RTPROMO', LAUNCH_DATE: '2026-10-07', LAUNCH_DATE_NEVER: '2026-10-12' });
 const dryConfig = { ...config, dryRun: true };
 const paths = campaignPaths(config);
 after(() => {
@@ -120,39 +121,45 @@ test('e2e: a whole campaign with the real commands and the real Excel', { timeou
     assert.equal(selection.stats.totalCents, 1533 + 1077 + 1977 + 1077 + 1977);
     bothWorkbooks('select');
 
-    // ---- live issue before LAUNCH_DATE is refused; a dry run is allowed ---------
-    assert.equal((await runIssue({ config, limit: 2, log, now, sleep })).exitCode, 2);
+    // ---- live issue before LAUNCH_DATE is refused; without --group too; a dry run is allowed ---------
+    assert.equal((await runIssue({ config, group: 'ordered', limit: 2, log, now, sleep })).exitCode, 2);
+    assert.equal((await runIssue({ config: dryConfig, limit: 2, log, now, sleep })).exitCode, 2, 'the real campaign needs --group');
     assert.equal(creates(), 0);
     const journalBefore = readJournal(paths.journal).length;
-    ok(await runIssue({ config: dryConfig, limit: 2, log, now, sleep }), 'dry-run issue');
+    ok(await runIssue({ config: dryConfig, group: 'ordered', limit: 2, log, now, sleep }), 'dry-run issue');
     assert.equal(creates(), 0, 'a dry run creates nothing');
     assert.equal(fake.opsNamed('TagsAdd').length, 0, 'a dry run tags nobody');
     assert.deepEqual(readJournal(paths.journal).slice(journalBefore).map((e) => e.op), ['run.start', 'run.end'], 'a dry run only records that it ran');
     assert.ok(fs.existsSync(path.join(paths.previewDir, 'first.html')), 'the dry run renders the first email');
     bothWorkbooks('dry-run issue');
 
-    // ---- 10/5 issue: 2, then the rest with one lost response --------------------
-    at('2026-10-05T16:00:00Z');
-    ok(await runIssue({ config, limit: 2, log, now, sleep }), 'issue --limit 2');
+    // ---- 10/7 issue --group ordered: 2, then the rest of the group with one lost response ------
+    at('2026-10-07T16:00:00Z');
+    assert.equal((await runIssue({ config, group: 'never', limit: 2, log, now, sleep })).exitCode, 2, 'the never group waits for LAUNCH_DATE_NEVER');
+    assert.equal(creates(), 0);
+    ok(await runIssue({ config, group: 'ordered', limit: 2, log, now, sleep }), 'issue --group ordered --limit 2');
     assert.equal(creates(), 2);
     assert.deepEqual(fake.state.calls.create.map((c) => c.customerId), [cid(1), cid(2)]);
     assert.deepEqual(fake.state.calls.create.map((c) => c.initialAmount.amount), ['15.33', '10.77']);
     assert.ok(fake.state.calls.create.every((c) => c.note === 'gift-card-promo [campaign:2026-10]' && c.templateSuffix === 'gift-card-promo' && c.expiresOn === '2026-10-19'));
     bothWorkbooks('issue --limit 2');
 
-    at('2026-10-05T16:30:00Z');
+    at('2026-10-07T16:30:00Z');
     fake.state.failures.GiftCardCreate = [{ kind: 'appliedThenLost' }]; // Shopify creates c3's card, the answer is lost
-    ok(await runIssue({ config, limit: 10, log, now, sleep }), 'issue --limit 10');
-    for (const n of [1, 2, 3, 4, 6]) assert.equal(cardOf(n).length, 1, `customer ${n} has exactly one card`);
-    for (const n of [5, 7, 8]) assert.equal(cardOf(n).length, 0, `customer ${n} has no card`);
+    ok(await runIssue({ config, group: 'ordered', limit: 10, log, now, sleep }), 'issue --group ordered --limit 10');
+    for (const n of [1, 2, 3, 6]) assert.equal(cardOf(n).length, 1, `customer ${n} has exactly one card`);
+    for (const n of [4, 5, 7, 8]) assert.equal(cardOf(n).length, 0, `customer ${n} has no card`);
     const state = foldJournal(readJournal(paths.journal));
-    for (const r of selection.recipients) assert.equal(state.customers.get(r.customerId).status, 'done', `${r.customerId} done`);
+    for (const r of selection.recipients.filter((x) => x.kind === 'ordered')) assert.equal(state.customers.get(r.customerId).status, 'done', `${r.customerId} done`);
+    assert.equal(state.customers.get(cid(4))?.status ?? 'pending', 'pending', 'the never group is untouched');
     assert.equal(state.customers.get(cid(3)).reconciledFrom, 'issue-inline', 'the lost response was reconciled, not re-created');
-    for (const n of [1, 2, 3, 4, 6]) assert.ok(fake.state.customers.find((c) => c.id === cid(n)).tags.includes('OCT26RTPROMO'));
-    bothWorkbooks('issue --limit 10');
+    const tagsOf = (n) => fake.state.customers.find((c) => c.id === cid(n)).tags;
+    for (const n of [1, 2, 3, 6]) assert.deepEqual(tagsOf(n), ['OCT26RTPROMO', 'OCT26RTPROMO-ORDERED'], `customer ${n} tags`);
+    assert.ok(log.lines.some((l) => l.includes('B 组（从没下单）共 1 人，还有 1 人待发放（要用 --group never 单独发）')), log.lines.slice(-20).join('\n'));
+    bothWorkbooks('issue --group ordered --limit 10');
 
     const createsSoFar = creates();
-    ok(await runIssue({ config, limit: 10, log, now, sleep }), 'issue with nobody left');
+    ok(await runIssue({ config, group: 'ordered', limit: 10, log, now, sleep }), 'issue with nobody left in the ordered group');
     assert.equal(creates(), createsSoFar, 'a re-run never creates a second card');
     bothWorkbooks('issue with nobody left');
     assert.equal((await runSelect({ config, log, now, sleep, bulkPollMs: 1 })).exitCode, 1, 'select is frozen once issuing started');
@@ -169,6 +176,16 @@ test('e2e: a whole campaign with the real commands and the real Excel', { timeou
       payments: [{ giftCardNumericId: annCard.id.split('/').pop(), amount: '5.00' }],
       lineItems: [{ name: 'Gold Balloon Arch', sku: 'ARCH-1', quantity: 1, amount: '40.00' }],
     }));
+
+    // ---- 10/12 issue --group never: the one customer who never ordered --------------------
+    at('2026-10-12T16:00:00Z');
+    ok(await runIssue({ config, group: 'never', limit: 10, log, now, sleep }), 'issue --group never');
+    assert.equal(cardOf(4).length, 1);
+    assert.equal(creates(), createsSoFar + 1);
+    assert.deepEqual(tagsOf(4), ['OCT26RTPROMO', 'OCT26RTPROMO-NEVER']);
+    assert.equal(fake.state.calls.create.at(-1).expiresOn, '2026-10-19', 'the same expiry date as the ordered group');
+    for (const r of selection.recipients) assert.equal(foldJournal(readJournal(paths.journal)).customers.get(r.customerId).status, 'done');
+    bothWorkbooks('issue --group never');
 
     // ---- 10/13 usage --------------------------------------------------------------
     at('2026-10-13T17:00:00Z');
@@ -187,7 +204,7 @@ test('e2e: a whole campaign with the real commands and the real Excel', { timeou
     // ---- 10/19 (the expiry date): issue creates nothing any more, only repairs -----------
     at('2026-10-19T17:00:00Z');
     const beforeExpiry = creates();
-    const onExpiry = await runIssue({ config, limit: 10, log, now, sleep });
+    const onExpiry = await runIssue({ config, group: 'never', limit: 10, log, now, sleep });
     assert.equal(onExpiry.exitCode, 0, 'nobody is waiting for a card, so the repairs-only run is fine');
     assert.equal(creates(), beforeExpiry, 'no card on the expiry date');
     assert.ok(log.lines.some((l) => l.includes('已到礼品卡到期日（2026-10-19）：只补记和补打 tag，不建新卡')), log.lines.slice(-20).join('\n'));

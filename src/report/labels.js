@@ -52,9 +52,23 @@ export function usedTagName(sentTag) {
   return `${sentTag}-USED`;
 }
 
+/** The two issue groups (selection recipient kinds), in the order they are issued. */
+export const ISSUE_GROUPS = Object.freeze(['ordered', 'never']);
+
+/**
+ * The group tag issue adds next to SENT_TAG when a card is created:
+ * <SENT_TAG>-ORDERED for recipients who have ordered, <SENT_TAG>-NEVER for
+ * those who never have. src/issue.js uses this same function.
+ */
+export function groupTagName(sentTag, group) {
+  if (!ISSUE_GROUPS.includes(group)) throw new Error(`unknown issue group "${group}"`);
+  return `${sentTag}-${group.toUpperCase()}`;
+}
+
 /** The Shopify Email recipient condition of the reminders (the same text in both editions). */
-export function reminderSegmentCondition(sentTag) {
-  return `customer_tags CONTAINS '${sentTag}' AND NOT customer_tags CONTAINS '${usedTagName(sentTag)}'`;
+export function reminderSegmentCondition(sentTag, group = null) {
+  const tag = group ? groupTagName(sentTag, group) : sentTag;
+  return `customer_tags CONTAINS '${tag}' AND NOT customer_tags CONTAINS '${usedTagName(sentTag)}'`;
 }
 
 /**
@@ -62,7 +76,7 @@ export function reminderSegmentCondition(sentTag) {
  * this campaign's tag names (`sentTag` = the campaign's SENT_TAG): [item, text] pairs.
  */
 export function reminderHelp(sentTag, lang = 'zh') {
-  return textFor(lang).reminderHelp(sentTag, usedTagName(sentTag), reminderSegmentCondition(sentTag));
+  return textFor(lang).reminderHelp(sentTag, usedTagName(sentTag), reminderSegmentCondition(sentTag), reminderSegmentCondition(sentTag, 'ordered'));
 }
 
 /** Customer kind of a recipient. */

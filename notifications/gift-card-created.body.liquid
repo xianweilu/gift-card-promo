@@ -27,25 +27,20 @@
 {% if is_promo %}
 {% capture email_title %}{% endcapture %}
 {% capture email_body %}<p>Hello{% if promo_name != '' %} {{ promo_name }}{% endif %},</p>
-<p>We did some "Balloon Math" and found some funds for you!</p>
-<p>Don't let your money go to waste!<br>
-You have an <strong>unused credit</strong> at <strong>LA Balloons</strong> waiting for you!<br>
+<p>We did some "Balloon Math" and found some funds for you!<br>
+Don't let your money go to waste!</p>
+<p>You have an <strong>unused credit</strong> at <strong>LA Balloons</strong> waiting for you!<br>
 It’s yours to use at <a href="{{ shop.url }}">LABalloons.com</a>{% if promo_long_date != '' %}, but you must use it or lose it by <strong>{{ promo_long_date }}</strong>{% endif %}.</p>
 <p>Click below to claim your credit code before it's gone:</p>{% endcapture %}
 {% capture button_text %}CLAIM IT NOW{% endcapture %}
 {% capture email_after %}
 <p>No strings attached!<br>
 Shop now and apply your code before it’s too late!</p>
-<p>We appreciate your business, and thank you for trusting us with your balloon and party supply needs!<br>
-Your support means the world to our team.</p>
-<p>- LA Balloons</p>
-<p style="font-size: 12px;"><strong>** Terms &amp; Conditions:</strong><br>
-This voucher is distributed entirely for free as part of a temporary marketing promotion; no monetary value or thing of value was paid in exchange for it. 
-  
-<span style="color: #FF2600; font-size: 12px">No cash value &amp; non-transferable.</span>
-  
-  
-  Valid only for merchandise online at <a href="{{ shop.url }}">www.laballoons.com</a>. This code cannot be redeemed for cash, and is explicitly exempt from California’s mandatory gift certificate cash-out regulations. Lost, deleted, or stolen promotional codes will not be replaced.{% if promo_short_date != '' %} Expires on {{ promo_short_date }}.{% endif %}</p>{% endcapture %}
+<p>We appreciate your business, and thank you for trusting us with your balloon and party supply needs!</p><br>
+<p style="margin: 0 0 28px 0;">Your support means the world to our team.</p>
+<p style="margin: 0 0 28px 0;">- LA Balloons</p>
+<p style="margin: 0; font-size: 8px; line-height: 1.5;"><strong style="font-size: 8px;">** Terms &amp; Conditions:</strong><br>
+This voucher is distributed entirely for free as part of a temporary marketing promotion; no monetary value or thing of value was paid in exchange for it. No cash value &amp; non-transferable. Valid only for merchandise online at <a href="{{ shop.url }}" style="font-size: 8px;">www.laballoons.com</a>. This code cannot be redeemed for cash, and is explicitly exempt from California’s mandatory gift certificate cash-out regulations. Lost, deleted, or stolen promotional codes will not be replaced.{% if promo_short_date != '' %} Expires on {{ promo_short_date }}.{% endif %}</p>{% endcapture %}
 {% else %}
 {% capture email_title %}Your Online Credit Code is now available! {% endcapture %}
 {% capture email_body %}<center>Hi{% if gift_card.customer %} {{ gift_card.customer.first_name }}{% endif %}, here is your {{ gift_card.balance | money_without_trailing_zeros }} online credit code.<br><br>Treat this code like cash and save this email for future reference.</center>{% endcapture %}

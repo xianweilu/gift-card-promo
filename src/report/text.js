@@ -288,11 +288,13 @@ const zh = {
   /**
    * How the reminders work now, on the "说明" sheet ([item, text] pairs): Shopify Email with a
    * segment built on the sent tag and the used-card tag. `sentTag` is the campaign's SENT_TAG,
-   * `usedTag` "<SENT_TAG>-USED" (labels.js usedTagName), `condition` the segment condition.
+   * `usedTag` "<SENT_TAG>-USED" (labels.js usedTagName), `condition` the segment condition of the
+   * second reminder (both groups), `firstCondition` that of the first (the ordered group only).
    */
-  reminderHelp: (sentTag, usedTag, condition) => [
+  reminderHelp: (sentTag, usedTag, condition, firstCondition) => [
     ['怎么发', `提醒邮件不再由程序发送，改用 Shopify Email。发提醒前先运行一次 usage，让用过卡的客户带上 ${usedTag}；然后在 Shopify Email 里用下面的收件人条件发送。`],
-    ['收件人条件', condition],
+    ['第一次提醒的收件人条件', `${firstCondition}（只发 A 组有下单的客户：B 组当天才收到首封邮件）`],
+    ['第二次提醒的收件人条件', `${condition}（两组一起）`],
     ['用卡 tag', `${usedTag}：每次运行 usage（不受 DRY_RUN 影响）都先查 Shopify 上已带这个 tag 的客户，再给余额小于面额、还没带 tag 的卡主打上，“操作日志”里记一行“${OP_LABELS['used.tag.ok']}”。打失败只警告，记一行“${OP_LABELS['used.tag.fail']}”，下次运行 usage 会再试。程序从不删 tag。`],
   ],
 
@@ -377,7 +379,10 @@ const zh = {
     noExpiry: '不设到期日',
     expiryNote: '到期日当天仍可使用',
     expiryChanged: (env, frozen) => `到期日当天仍可使用。注意：.env 的 GIFT_CARD_EXPIRES_ON 现在是 ${env}，但建卡仍用生成名单时的 ${frozen}`,
-    launchDate: '首封邮件日期（正式建卡）',
+    launchDate: 'A 组建卡日（有下单，LAUNCH_DATE）',
+    launchDateNever: 'B 组建卡日（从没下单，LAUNCH_DATE_NEVER）',
+    /** The group tags issue adds next to SENT_TAG. */
+    groupTags: '组 tag（建卡时和发放 tag 一起打）',
     /** A date of .env that differs from the one frozen in the list ('' = 未设置, filled in by the caller). */
     dateChanged: (then, now) => `生成名单时为 ${then}，现在按 .env 为 ${now}`,
     sentTag: '发放 tag（SENT_TAG）',
@@ -436,6 +441,9 @@ const zh = {
     skipReasonsHeader: freeze(['发放前跳过的原因', '人数']),
     reasonMissing: '原因未记录',
     progressNote: '金额：已建卡的按卡的金额，其余按名单金额。“进行中”只在 issue 运行时出现；issue 不在运行时，这些人算作“需人工核对”。',
+    /** Progress per group (issue --group): the two kinds of recipients, issued on different days. */
+    progressByGroupHeader: freeze(['客户类型（组）', '建卡日', '人数', '已完成', '待发放', '其他状态']),
+    progressByGroupNote: '两组分别用 issue --group ordered（有下单）和 issue --group never（从没下单）建卡。“其他状态”= 进行中、需人工核对、已建卡未打 tag、失败、发放前跳过。',
     // usage
     usage: '使用情况',
     asOf: '截至',
@@ -918,9 +926,10 @@ const en = {
   GID_TYPE_LABELS: GID_TYPE_LABELS_EN,
   SUMMARY_KEY_LABELS: SUMMARY_KEY_LABELS_EN,
 
-  reminderHelp: (sentTag, usedTag, condition) => [
-    ['How reminders are sent', `The program no longer sends reminder emails; they go out with Shopify Email. Before a reminder, run usage once so that everyone who used their card carries ${usedTag}; then send from Shopify Email with the recipient condition below.`],
-    ['Recipient condition', condition],
+  reminderHelp: (sentTag, usedTag, condition, firstCondition) => [
+    ['How reminders are sent', `The program no longer sends reminder emails; they go out with Shopify Email. Before a reminder, run usage once so that everyone who used their card carries ${usedTag}; then send from Shopify Email with the recipient conditions below.`],
+    ['First reminder, recipient condition', `${firstCondition} (group A, customers who ordered before, only: group B gets its first email that day)`],
+    ['Second reminder, recipient condition', `${condition} (both groups)`],
     ['Used tag', `${usedTag}: every usage run (DRY_RUN does not matter) first looks up the customers already carrying this tag in Shopify, then tags the owner of every card whose balance is below its face value and who does not carry it yet; the "${SHEETS_EN.journal}" sheet gets a row "${OP_LABELS_EN['used.tag.ok']}". A failure is only a warning, written as "${OP_LABELS_EN['used.tag.fail']}"; the next usage run tries again. The program never removes tags.`],
   ],
 
@@ -998,7 +1007,9 @@ const en = {
     noExpiry: 'no expiry',
     expiryNote: 'The card still works on the expiry date itself',
     expiryChanged: (env, frozen) => `The card still works on the expiry date itself. Note: GIFT_CARD_EXPIRES_ON in .env is now ${env}, but cards are still created with ${frozen}, frozen when the list was generated`,
-    launchDate: 'First email date (live card creation)',
+    launchDate: 'Group A card day (ordered before, LAUNCH_DATE)',
+    launchDateNever: 'Group B card day (never ordered, LAUNCH_DATE_NEVER)',
+    groupTags: 'Group tags (added with the sent tag when the card is created)',
     dateChanged: (then, now) => `${then} when the list was generated, now ${now} per .env`,
     sentTag: 'Sent tag (SENT_TAG)',
     excludeTags: 'Excluded tags (case-insensitive)',
@@ -1055,6 +1066,8 @@ const en = {
     skipReasonsHeader: freeze(['Reasons skipped before issuing', 'People']),
     reasonMissing: 'reason not recorded',
     progressNote: 'Amount: created cards by the card\'s amount, the rest by the list amount. "In progress" appears only while issue is running; otherwise those people count as "Needs review".',
+    progressByGroupHeader: freeze(['Customer type (group)', 'Card day', 'People', 'Done', 'Pending', 'Other statuses']),
+    progressByGroupNote: 'The two groups are issued separately with issue --group ordered (ordered before) and issue --group never (never ordered). "Other statuses" = in progress, needs review, card created but not tagged, failed, skipped before issuing.',
     // usage
     usage: 'Usage',
     asOf: 'As of',

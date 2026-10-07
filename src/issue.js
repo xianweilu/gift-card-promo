@@ -22,6 +22,17 @@
 // to Shopify and only run.start/run.end to the journal; every state change is
 // simulated in memory so the preview shows exactly what a real run would do.
 //
+// Groups: the list is issued in two groups on two days, so every run of the
+// real campaign names one with --group: 'ordered' (recipients who have ordered,
+// selection kind 'ordered', from LAUNCH_DATE on) or 'never' (those who never
+// have, kind 'never', from LAUNCH_DATE_NEVER on). Only that group's pending
+// rows are candidates; the repairs (open outcomes, missing tags) cover both.
+// Besides SENT_TAG every customer gets a group tag, <SENT_TAG>-ORDERED or
+// <SENT_TAG>-NEVER, in the same tagsAdd call, so Shopify Email can address one
+// group (the first reminder goes to the ordered group only). Test campaigns
+// have no groups (--group is ignored); their group tag follows the customer's
+// order count.
+//
 // Dates: a real run of the real campaign creates cards from LAUNCH_DATE on
 // (test campaigns any day). No card is created on or after the cards' expiry
 // date (selection.params.giftCardExpiresOn, the date every card is created
@@ -55,6 +66,7 @@ import { formatUsd } from './select/amount.js';
 import { buildActivity, isValidOrder, parseCustomer } from './select/rules.js';
 import { defaultSleep, gql } from './shopify.js';
 import { localDate, localDateTime } from './time.js';
+import { ISSUE_GROUPS, groupTagName } from './report/labels.js';
 
 const CHUNK_SIZE = 250; // nodes(ids:) accepts at most 250 ids per request
 const MAX_CONSECUTIVE_FAILURES = 5;
@@ -75,6 +87,25 @@ export const SKIP_REASONS = Object.freeze({
 });
 
 export const SELECTION_REPLACED = '名单刚被 select 改写，请重新运行';
+
+/** The two issue groups (labels.js ISSUE_GROUPS) and their Chinese names; the group tag is labels.js groupTagName. */
+export { ISSUE_GROUPS, groupTagName };
+export const GROUP_LABELS = Object.freeze({ ordered: 'A 组（有下单）', never: 'B 组（从没下单）' });
+
+/**
+ * The group of a selection recipient: its kind for the real campaign; a test
+ * recipient (kind 'test') goes by the customer's order count.
+ */
+export function recipientGroup(r) {
+  if (ISSUE_GROUPS.includes(r.kind)) return r.kind;
+  return Number(r.numberOfOrders) > 0 ? 'ordered' : 'never';
+}
+
+/** Group tags of a run that issues `group` (null = a test campaign: both). */
+export function groupTagsText(sentTag, group) {
+  const groups = group ? [group] : ISSUE_GROUPS;
+  return groups.map((g) => groupTagName(sentTag, g)).join(' 或 ');
+}
 
 /** Refusal (real run) / warning (dry run) on or after the cards' expiry date. */
 function tooLateText(expiresOn) {
@@ -132,6 +163,7 @@ class Stop extends Error {
  *
  * @param {object} o
  * @param {object} o.config loadConfig() result; `dryRun` false means live
+ * @param {'ordered'|'never'|null} [o.group] which group to issue (required for the real campaign unless repairOnly; ignored by test campaigns)
  * @param {number} [o.limit] cards to attempt this run (required live, except with repairOnly; ≤ ISSUE_MAX_PER_RUN). Skipped people do not count.
  * @param {boolean} [o.retryFailed] only retry rows whose create was rejected with userErrors
  * @param {boolean} [o.repairOnly] only the repairs (open outcomes, missing tags, cards Shopify already has); never creates a card
@@ -143,6 +175,7 @@ class Stop extends Error {
  */
 export async function runIssue({
   config,
+  group = null,
   limit,
   retryFailed = false,
   repairOnly = false,
@@ -170,6 +203,11 @@ export async function runIssue({
   }
   if (repairOnly && retryFailed) {
     log.error(REPAIR_ONLY_CONFLICT);
+    return done(2);
+  }
+  group = group === undefined || group === null || group === '' ? null : String(group).trim().toLowerCase();
+  if (group !== null && !ISSUE_GROUPS.includes(group)) {
+    log.error(`--group 只能是 ordered（有下单的客户）或 never（从没下单的客户），收到 "${group}"`);
     return done(2);
   }
   // A repair-only run creates no card, so it needs no --limit.
@@ -201,22 +239,36 @@ export async function runIssue({
     return done(1);
   }
   const tz = selection.params.timezone;
+  const testCampaign = selection.mode === 'test';
 
-  // 3. Date guards. LAUNCH_DATE (real campaign only; test campaigns may run any day) refuses real
-  //    runs that may create cards; dry runs and repair-only runs (which send nothing) may run before
-  //    it. From the cards' expiry date on, no NEW card is created, in a real run or its dry run;
-  //    repairs that send nothing (settling leftovers, adding missing tags, recording cards Shopify
-  //    already has) still run. walk() checks the date again before every card.
+  // 3. The group. The real campaign issues one group per run (a repair-only run repairs both);
+  //    a test campaign has no groups.
+  if (testCampaign) {
+    if (group) log.info(`测试活动不分组：忽略 --group ${group}，名单里的人都会处理`);
+    group = null;
+  } else if (!group && !repairOnly) {
+    log.error('请用 --group 指定这次发哪一组：--group ordered（A 组，有下单的客户）或 --group never（B 组，从没下单的客户）');
+    return done(2);
+  }
+  // The group's launch date: LAUNCH_DATE for the ordered group, LAUNCH_DATE_NEVER for the never group.
+  const launchDate = group === 'never' ? config.launchDateNever : group === 'ordered' ? config.launchDate : null;
+
+  // 4. Date guards. The group's launch date (real campaign only; test campaigns may run any day)
+  //    refuses real runs that may create cards; dry runs and repair-only runs (which send nothing)
+  //    may run before it. From the cards' expiry date on, no NEW card is created, in a real run or
+  //    its dry run; repairs that send nothing (settling leftovers, adding missing tags, recording
+  //    cards Shopify already has) still run. walk() checks the date again before every card.
   const startMs = now().getTime();
   const today = localDate(startMs, tz);
-  if (!dryRun && !repairOnly && selection.mode !== 'test' && config.launchDate && today < config.launchDate) {
-    log.error(`正式活动要到 ${config.launchDate}（店铺时间）才能建卡发信。现在是店铺时间 ${localDateTime(startMs, tz)}；测试活动不受这个限制`);
+  if (!dryRun && !repairOnly && !testCampaign && launchDate && today < launchDate) {
+    log.error(`${GROUP_LABELS[group]}要到 ${launchDate}（店铺时间，${group === 'never' ? 'LAUNCH_DATE_NEVER' : 'LAUNCH_DATE'}）才能建卡发信。`
+      + `现在是店铺时间 ${localDateTime(startMs, tz)}；测试活动不受这个限制`);
     return done(2);
   }
   const dateBlocked = newCardsBlockedOn(selection, today);
   warnConfigDrift(config, selection, log);
 
-  // 4. One write command at a time (dry runs too: they must see a journal nobody else is changing).
+  // 5. One write command at a time (dry runs too: they must see a journal nobody else is changing).
   let release;
   try {
     release = acquireRunLock(paths, 'issue');
@@ -232,9 +284,10 @@ export async function runIssue({
   }
 
   const isoNow = () => now().toISOString();
+  summary.group = group;
   const run = new IssueRun({
     config, paths, selection, tz, today, startMs, log, now, sleep, signal, renderPreview, dryRun, summary,
-    dateBlocked, repairOnly,
+    dateBlocked, repairOnly, group, launchDate,
     retryFailed: !!retryFailed,
     maxCreates: limitGiven ? limit : Infinity,
     reconcileWaitMs, reconcilePollMs, unknownSettleMs,
@@ -249,7 +302,7 @@ export async function runIssue({
     summary.batch = run.batch;
     appendJournal(paths.journal, {
       op: 'run.start', run: run.runId, command: 'issue', dryRun, batch: run.batch,
-      limit: limitGiven ? limit : null, options: { retryFailed: !!retryFailed, repairOnly },
+      limit: limitGiven ? limit : null, options: { group, retryFailed: !!retryFailed, repairOnly },
     }, { now: isoNow });
     started = true;
     exitCode = await run.execute();
@@ -324,7 +377,8 @@ class IssueRun {
     if (blocked.length) return this.stopForUnknown(blocked);
     const pre = await this.preflight(); // step 8
     const wanted = this.retryFailed ? STATUS.FAILED : STATUS.PENDING;
-    const candidates = this.recipients.filter((r) => this.status(r.customerId) === wanted);
+    // Only this run's group (a test campaign has none: everyone).
+    const candidates = this.recipients.filter((r) => this.inGroup(r) && this.status(r.customerId) === wanted);
     const queue = await this.applyGuards(candidates, pre); // records cards Shopify already has; creates nothing
     if (this.noNewCards) return this.refuseNewCards(queue);
     const exitCode = await this.walk(queue, pre); // steps 9-10
@@ -380,6 +434,16 @@ class IssueRun {
   }
 
   // -- state ----------------------------------------------------------------
+
+  /** True when recipient `r` belongs to this run's group (every recipient when there is none). */
+  inGroup(r) {
+    return !this.group || recipientGroup(r) === this.group;
+  }
+
+  /** The tags a customer gets when their card is made: SENT_TAG and their group tag. */
+  tagsFor(r) {
+    return [this.config.sentTag, groupTagName(this.config.sentTag, recipientGroup(r))];
+  }
 
   status(cid) {
     return this.local.get(cid) ?? this.journal.customers.get(cid)?.status ?? STATUS.PENDING;
@@ -489,10 +553,10 @@ class IssueRun {
     if (this.dryRun) {
       for (const r of rows) this.setStatus(r.customerId, STATUS.DONE);
       this.summary.tagFixed += rows.length;
-      this.log.info(`预演：${rows.length} 人已建卡但还没打 tag，真实运行会先给他们补打 tag ${this.config.sentTag}`);
+      this.log.info(`预演：${rows.length} 人已建卡但还没打 tag，真实运行会先给他们补打 tag ${this.config.sentTag}（和组 tag）`);
       return;
     }
-    this.log.info(`补打 tag：${rows.length} 人已建卡但还没打 tag ${this.config.sentTag}`);
+    this.log.info(`补打 tag：${rows.length} 人已建卡但还没打 tag ${this.config.sentTag}（和组 tag）`);
     for (const r of rows) {
       this.checkAbort();
       if (await this.tag(r)) {
@@ -502,20 +566,38 @@ class IssueRun {
     }
   }
 
-  /** tagsAdd + journal. A failure is recorded and the run goes on: the next run tags again. */
+  /**
+   * tagsAdd (SENT_TAG and the group tag in one call) + journal. A failure is recorded and the run
+   * goes on: the next run tags again.
+   */
   async tag(r) {
     const cid = r.customerId;
+    const tags = this.tagsFor(r);
     try {
-      await addTag(cid, this.config.sentTag);
+      await addTag(cid, tags);
     } catch (err) {
       this.record({ op: 'tag.fail', cid, error: err.message });
       this.summary.tagFailed += 1;
       this.log.warn(`${label(r)}：打 tag 失败（${err.message}）；卡已经建好，下次运行会补打 tag`);
       return false;
     }
-    this.record({ op: 'tag.ok', cid });
+    this.record({ op: 'tag.ok', cid, tags });
     this.setStatus(cid, STATUS.DONE);
     return true;
+  }
+
+  /**
+   * A customer who already carries SENT_TAG (a card recorded from Shopify) still gets their group
+   * tag, best effort: tagsAdd is idempotent, and SENT_TAG alone already keeps them from a second card.
+   */
+  async ensureGroupTag(r) {
+    if (this.dryRun) return;
+    const tags = this.tagsFor(r);
+    try {
+      await addTag(r.customerId, tags);
+    } catch (err) {
+      this.log.warn(`${label(r)}：补打组 tag ${tags[1]} 失败（${err.message}）；${this.config.sentTag} 已在，不会重复建卡`);
+    }
   }
 
   // -- step 8: read-only pre-flight -------------------------------------------
@@ -563,7 +645,8 @@ class IssueRun {
         log.warn(`${p}${label(r)}：Shopify 上已有本活动的卡（…${card.last4}，${formatUsd(card.amountCents)}），本地日志里没有记录；${this.dryRun ? '真实运行会补记' : '已补记'}，不会再建卡`);
         this.warnCardDetails(r, card, cards.length);
         if (pre.taggedIds.has(cid)) {
-          this.record({ op: 'tag.ok', cid, note: 'already tagged in Shopify' });
+          await this.ensureGroupTag(r); // SENT_TAG is there; the group tag may not be
+          this.record({ op: 'tag.ok', cid, note: 'already tagged in Shopify', tags: this.tagsFor(r) });
           this.setStatus(cid, STATUS.DONE);
           this.summary.tagFixed += 1;
         } else if (this.dryRun) {
@@ -628,7 +711,7 @@ class IssueRun {
       }
     }
     if (Number.isFinite(this.maxCreates) && this.summary.attempted < this.maxCreates) {
-      log.info(this.retryFailed ? '没有更多建卡失败、待重试的人了' : '名单里已经没有更多待发放的人了');
+      log.info(this.retryFailed ? '没有更多建卡失败、待重试的人了' : `${this.group ? GROUP_LABELS[this.group] : '名单'}里已经没有更多待发放的人了`);
     }
     return 0;
   }
@@ -857,6 +940,7 @@ class IssueRun {
   banner() {
     const { config, selection, log } = this;
     const parts = [`批次 ${this.batch}`, `活动 ${config.campaignId}${selection.mode === 'test' ? '（测试活动）' : ''}`];
+    if (this.group) parts.push(`${GROUP_LABELS[this.group]}，共 ${this.groupSize(this.group)} 人`);
     if (this.repairOnly) parts.push('只补记和补打 tag，不建新卡（--repair-only）');
     else if (this.dateBlocked) parts.push(`已到礼品卡到期日（${this.expiresOn}）：只补记和补打 tag，不建新卡`);
     else parts.push(Number.isFinite(this.maxCreates) ? `本次最多建卡 ${this.maxCreates} 张` : '不限张数（预演全部剩下的人）');
@@ -865,16 +949,26 @@ class IssueRun {
     if (this.dryRun) {
       log.info('预演（DRY_RUN）：只从 Shopify 读数据，不建卡、不发邮件、不打 tag；本地日志只记一条预演记录。真实运行要在命令前加 DRY_RUN=false');
       if (!this.repairOnly) {
-        if (selection.mode !== 'test' && config.launchDate && this.today < config.launchDate) {
-          log.warn(`注意：正式活动要到 ${config.launchDate}（店铺时间）才能真实建卡发信；预演不受这个限制`);
+        if (selection.mode !== 'test' && this.launchDate && this.today < this.launchDate) {
+          log.warn(`注意：${GROUP_LABELS[this.group]}要到 ${this.launchDate}（店铺时间）才能真实建卡发信；预演不受这个限制`);
         }
         if (this.dateBlocked) log.warn(`注意：${tooLateText(this.expiresOn)}`);
       }
     } else if (this.noNewCards) {
-      log.info(`真实运行：只补记 Shopify 上已有的卡、补打 tag ${config.sentTag}；不建新卡，不发邮件`);
+      log.info(`真实运行：只补记 Shopify 上已有的卡、补打 tag ${config.sentTag}（和组 tag）；不建新卡，不发邮件`);
     } else {
-      log.info(`真实运行：会建礼品卡（Shopify 建卡时自动给客户发首封邮件），然后给客户打 tag ${config.sentTag}`);
+      log.info(`真实运行：会建礼品卡（Shopify 建卡时自动给客户发首封邮件），然后给客户打 tag ${config.sentTag} 和 ${groupTagsText(config.sentTag, this.group)}`);
     }
+  }
+
+  /** How many recipients are in `group`. */
+  groupSize(group) {
+    return this.recipients.filter((r) => recipientGroup(r) === group).length;
+  }
+
+  /** Pending recipients of `group` (null = all). */
+  pendingIn(group) {
+    return this.recipients.filter((r) => (!group || recipientGroup(r) === group) && this.status(r.customerId) === STATUS.PENDING).length;
   }
 
   logProgress() {
@@ -939,8 +1033,9 @@ class IssueRun {
     }
   }
 
+  /** Pending recipients of this run's group (everyone when there is none). */
   remainingPending() {
-    return this.recipients.filter((r) => this.status(r.customerId) === STATUS.PENDING).length;
+    return this.pendingIn(this.group);
   }
 
   printSummary() {
@@ -966,7 +1061,14 @@ class IssueRun {
     log.info(`失败：${s.failed} 人${s.failed ? '（原因解决后用 --retry-failed --limit N 重试）' : ''}`);
     if (s.rejected) log.info(`Shopify 没有接受、没有建卡：${s.rejected} 人（仍是待发放，下次运行会重试）`);
     log.info(`结果不明：${s.unknown + s.stillUnknown} 人`);
-    log.info(`名单共 ${this.recipients.length} 人，${dryRun ? '这一批之后' : '现在'}还有 ${this.remainingPending()} 人待发放`);
+    const when = dryRun ? '这一批之后' : '现在';
+    if (this.group) {
+      const other = this.group === 'ordered' ? 'never' : 'ordered';
+      log.info(`${GROUP_LABELS[this.group]}共 ${this.groupSize(this.group)} 人，${when}还有 ${this.remainingPending()} 人待发放；`
+        + `${GROUP_LABELS[other]}共 ${this.groupSize(other)} 人，还有 ${this.pendingIn(other)} 人待发放（要用 --group ${other} 单独发）`);
+    } else {
+      log.info(`名单共 ${this.recipients.length} 人，${when}还有 ${this.remainingPending()} 人待发放`);
+    }
   }
 }
 

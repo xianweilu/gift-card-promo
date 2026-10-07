@@ -149,14 +149,23 @@ export function loadConfig(env = process.env, { envFile = path.join(ROOT_DIR, '.
     throw new ConfigError(`GIFT_CARD_CURRENCY must be a 3-letter ISO code, got "${giftCardCurrency}"`);
   }
 
-  // Campaign dates, calendar days in the store's time zone. LAUNCH_DATE gates
-  // live issue runs of the real campaign; the expiry is the last usable day and
-  // the day from which issue creates no new card. (Reminders are sent with
-  // Shopify Email, so there are no reminder dates any more.)
+  // Campaign dates, calendar days in the store's time zone. The recipients are
+  // issued in two groups on two days: LAUNCH_DATE gates live issue runs for the
+  // customers who have ordered (--group ordered), LAUNCH_DATE_NEVER for those
+  // who never have (--group never). The expiry is the last usable day and the
+  // day from which issue creates no new card. (Reminders are sent with Shopify
+  // Email, so there are no reminder dates any more.)
   const giftCardExpiresOn = dateValue(env, 'GIFT_CARD_EXPIRES_ON');
   const launchDate = dateValue(env, 'LAUNCH_DATE');
+  const launchDateNever = dateValue(env, 'LAUNCH_DATE_NEVER');
   if (giftCardExpiresOn && launchDate && launchDate > giftCardExpiresOn) {
     throw new ConfigError(`LAUNCH_DATE (${launchDate}) must not be later than GIFT_CARD_EXPIRES_ON (${giftCardExpiresOn})`);
+  }
+  if (giftCardExpiresOn && launchDateNever && launchDateNever > giftCardExpiresOn) {
+    throw new ConfigError(`LAUNCH_DATE_NEVER (${launchDateNever}) must not be later than GIFT_CARD_EXPIRES_ON (${giftCardExpiresOn})`);
+  }
+  if (launchDate && launchDateNever && launchDateNever < launchDate) {
+    throw new ConfigError(`LAUNCH_DATE_NEVER (${launchDateNever}) must not be earlier than LAUNCH_DATE (${launchDate})`);
   }
 
   const testCustomerIds = list(env, 'TEST_CUSTOMER_IDS', '').map(customerGid);
@@ -196,6 +205,7 @@ export function loadConfig(env = process.env, { envFile = path.join(ROOT_DIR, '.
     giftCardExpiresOn,
     giftCardTemplateSuffix: str(env, 'GIFT_CARD_TEMPLATE_SUFFIX'),
     launchDate,
+    launchDateNever,
     issueMaxPerRun: int(env, 'ISSUE_MAX_PER_RUN', 20000, { min: 1, max: 100000 }),
     testCustomerIds,
     testGiftAmountCents: dollars(env, 'TEST_GIFT_AMOUNT', '0.10', { minCents: 1, maxCents: 2000 }),
