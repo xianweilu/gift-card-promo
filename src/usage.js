@@ -51,6 +51,7 @@ import { findCampaignCards } from './giftcards.js';
 import { fetchTaggedCustomerIds, addTag } from './customers.js';
 import { localDate, localDateTime } from './time.js';
 import { formatUsd, tierLabel } from './select/amount.js';
+import { groupTagName } from './report/labels.js';
 
 export const USAGE_VERSION = 1;
 export const NO_RECEIPT_ID_REASON = '回执里没有礼品卡 ID';
@@ -64,9 +65,14 @@ export function usedTagName(sentTag) {
   return `${sentTag}-USED`;
 }
 
-/** The Shopify Email segment condition that reaches only the people who have not used their card. */
-export function reminderSegmentCondition(sentTag) {
-  return `customer_tags CONTAINS '${sentTag}' AND NOT customer_tags CONTAINS '${usedTagName(sentTag)}'`;
+/**
+ * The Shopify Email segment condition that reaches only the people who have not used their card:
+ * everyone with SENT_TAG, or, with `group`, one issue group by its group tag (<SENT_TAG>-ORDERED /
+ * -NEVER; the first reminder goes to the ordered group only).
+ */
+export function reminderSegmentCondition(sentTag, group = null) {
+  const tag = group ? groupTagName(sentTag, group) : sentTag;
+  return `customer_tags CONTAINS '${tag}' AND NOT customer_tags CONTAINS '${usedTagName(sentTag)}'`;
 }
 
 const HOUR_MS = 3_600_000;
@@ -731,7 +737,7 @@ export async function runUsage({ config, log = console, now = () => new Date(), 
     // The one write of this command: the used-card tag, so the Shopify Email reminder segment can
     // leave these customers out. Not gated by DRY_RUN (idempotent, harmless).
     const usedTag = usedTagName(config.sentTag);
-    log.info(`正在给用过卡（余额小于面额）的客户打 tag ${usedTag}（不受 DRY_RUN 影响）。提醒邮件用 Shopify Email 发送，收件人条件：${reminderSegmentCondition(config.sentTag)}`);
+    log.info(`正在给用过卡（余额小于面额）的客户打 tag ${usedTag}（不受 DRY_RUN 影响）。提醒邮件用 Shopify Email 发送，收件人条件：第一次提醒（只发 A 组）${reminderSegmentCondition(config.sentTag, 'ordered')}；第二次提醒（两组一起）${reminderSegmentCondition(config.sentTag)}`);
     const usedTagResult = await tagUsedCards({ cards, tag: usedTag, journal: paths.journal, run, nowIso, log });
 
     // Needs the cards: the daily table starts at the earlier of the first live issue run and the oldest card.

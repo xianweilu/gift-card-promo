@@ -8,10 +8,14 @@ export const USAGE = `用法：node index.js <命令> [选项]
   check                                检查 token、权限和配置，不改任何东西
   select [--refresh]                   第 1 步：导出全店客户 → 筛选 → 同地址去重 → 算金额 → 生成 Excel（只读）
                                        --refresh 强制重新导出（默认 24 小时内复用上次导出的数据）
-  issue [--limit N] [--retry-failed] [--repair-only]
+  issue --group ordered|never [--limit N] [--retry-failed] [--repair-only]
                                        第 2 步：建卡（Shopify 自动发首封邮件）并打 tag；默认只预演
+                                       --group ordered 只发 A 组（有下单的客户），从 LAUNCH_DATE 起
+                                       --group never   只发 B 组（从没下单的客户），从 LAUNCH_DATE_NEVER 起
+                                       建卡时打两个 tag：<SENT_TAG> 和 <SENT_TAG>-ORDERED 或 <SENT_TAG>-NEVER
                                        --retry-failed 只重试"失败"的人
-                                       --repair-only 只补记和补打 tag，不建新卡（不需要 --limit）
+                                       --repair-only 只补记和补打 tag，不建新卡（不需要 --limit 和 --group）
+                                       测试活动（TEST_CUSTOMER_IDS）不用写 --group
   usage                                每日使用情况：卡有没有被用、用在哪笔订单、买了什么；给用过卡的人打 <SENT_TAG>-USED（只读卡和订单）
   verify                               与 Shopify 核对已建的卡和 tag（只读）
   export [--refresh] [--out <路径>]     重新生成 Excel；--refresh 先从 Shopify 刷新 tag 列；--out 另存一份
@@ -20,10 +24,12 @@ export const USAGE = `用法：node index.js <命令> [选项]
                                        --seq 用名单里第 N 号客户的名字和金额；--open 在浏览器打开
 
 issue 默认只预演。真实运行要在命令前加 DRY_RUN=false，例如：
-  DRY_RUN=false node index.js issue --limit 20
+  DRY_RUN=false node index.js issue --group ordered --limit 20     # A 组，LAUNCH_DATE 那天
+  DRY_RUN=false node index.js issue --group never --limit 20000    # B 组，LAUNCH_DATE_NEVER 那天
 
 提醒邮件改用 Shopify Email 发送：发送前先跑 usage（给用过卡的人打 <SENT_TAG>-USED），收件人条件
-  customer_tags CONTAINS '<SENT_TAG>' AND NOT customer_tags CONTAINS '<SENT_TAG>-USED'
+  第一次提醒（只发 A 组）：customer_tags CONTAINS '<SENT_TAG>-ORDERED' AND NOT customer_tags CONTAINS '<SENT_TAG>-USED'
+  第二次提醒（两组一起）：customer_tags CONTAINS '<SENT_TAG>' AND NOT customer_tags CONTAINS '<SENT_TAG>-USED'
 
 测试活动：把 CAMPAIGN_ID、SENT_TAG、TEST_CUSTOMER_IDS 写进 .env.test（见 .env.example），再用
   node --env-file=.env.test index.js <命令>`;
@@ -32,7 +38,7 @@ issue 默认只预演。真实运行要在命令前加 DRY_RUN=false，例如：
 export const COMMANDS = {
   check: { options: {} },
   select: { options: { refresh: { type: 'boolean' } } },
-  issue: { options: { limit: { type: 'string' }, 'retry-failed': { type: 'boolean' }, 'repair-only': { type: 'boolean' } } },
+  issue: { options: { group: { type: 'string' }, limit: { type: 'string' }, 'retry-failed': { type: 'boolean' }, 'repair-only': { type: 'boolean' } } },
   usage: { options: {} },
   verify: { options: {} },
   export: { options: { refresh: { type: 'boolean' }, out: { type: 'string' } } },
@@ -40,6 +46,8 @@ export const COMMANDS = {
 };
 
 export const PREVIEW_VARIANTS = ['first', 'original'];
+/** The two issue groups: recipients who have ordered (selection kind 'ordered') and those who never have ('never'). */
+export const ISSUE_GROUPS = ['ordered', 'never'];
 
 export class UsageError extends Error {
   constructor(message) {
@@ -81,7 +89,13 @@ export function parseCommand(argv) {
       const repairOnly = !!values['repair-only'];
       // --repair-only never creates a card; --retry-failed exists to create them.
       if (repairOnly && retryFailed) throw new UsageError('--repair-only 和 --retry-failed 不能一起用：--repair-only 只补记和补打 tag，不建卡');
-      return { command, limit: values.limit === undefined ? undefined : positiveInt(values.limit, '--limit'), retryFailed, repairOnly };
+      // --group is checked against the campaign in issue itself: the real campaign
+      // requires it (unless --repair-only), a test campaign ignores it.
+      const group = values.group === undefined ? null : String(values.group).trim().toLowerCase();
+      if (group !== null && !ISSUE_GROUPS.includes(group)) {
+        throw new UsageError(`--group 只能是 ordered（有下单的客户）或 never（从没下单的客户），收到 "${values.group}"`);
+      }
+      return { command, group, limit: values.limit === undefined ? undefined : positiveInt(values.limit, '--limit'), retryFailed, repairOnly };
     }
     case 'export':
       if (values.out !== undefined && !values.out.trim()) throw new UsageError('--out 后面要写文件路径');

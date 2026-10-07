@@ -18,6 +18,8 @@ const LAUNCH_DAY_MS = Date.parse('2026-10-05T17:00:00Z'); // 10:00 on LAUNCH_DAT
 const TOTALS = ['50.00', '150.00', '200.00'];
 const TIER_AMOUNTS = ['10.77', '15.33', '19.77'];
 const TAG = 'gift-card-sent-2026-10'; // testConfig() default SENT_TAG
+const TAG_ORDERED = `${TAG}-ORDERED`; // the group tag of recipients who have ordered
+const TAG_NEVER = `${TAG}-NEVER`; // ... and of those who never have
 const NOTE = 'gift-card-promo [campaign:2026-10]';
 const noop = async () => {};
 
@@ -108,6 +110,8 @@ async function setup({ n = 6, customers, env = {}, failures = {}, testCampaign =
     async run(opts = {}) {
       const result = await runIssue({
         config: h.config,
+        // The real campaign issues one group per run; the fixtures' customers have all ordered.
+        group: 'ordered',
         log,
         now: () => new Date(clock.ms),
         sleep: noop,
@@ -152,7 +156,7 @@ describe('issue: real runs', () => {
         templateSuffix: 'gift-card-promo',
       });
     });
-    assert.deepEqual(h.fake.state.calls.tag, [1, 2, 3].map((k) => ({ id: gid('Customer', k), tags: [TAG] })));
+    assert.deepEqual(h.fake.state.calls.tag, [1, 2, 3].map((k) => ({ id: gid('Customer', k), tags: [TAG, TAG_ORDERED] })), 'SENT_TAG and the group tag in one call');
 
     const states = h.states();
     for (const k of [1, 2, 3]) {
@@ -175,7 +179,7 @@ describe('issue: real runs', () => {
       'run.end',
     ]);
     const [start] = journal;
-    assertSummary(start, { command: 'issue', dryRun: false, batch: 1, limit: 3, options: { retryFailed: false, repairOnly: false } });
+    assertSummary(start, { command: 'issue', dryRun: false, batch: 1, limit: 3, options: { group: 'ordered', retryFailed: false, repairOnly: false } });
     assert.ok(journal.every((e) => e.run === start.run), 'every entry carries the run id');
     assert.ok(journal.every((e) => e.t.startsWith('2026-10-05T17:00')), 'timestamps come from the injected clock');
     assert.deepEqual(journal.at(-1).summary, summary);
@@ -352,7 +356,7 @@ describe('issue: dry run', () => {
     assert.ok(h.logged('#2 First2 Last2：未订阅邮件营销（UNSUBSCRIBED）'));
     assert.ok(h.logged('#1 First1 Last1 <c1@example.org> $10.77'));
     assert.ok(h.logged(path.join(h.paths.previewDir, 'first.html')));
-    assert.ok(h.logged('正式活动要到 2026-10-05（店铺时间）才能真实建卡发信'));
+    assert.ok(h.logged('A 组（有下单）要到 2026-10-05（店铺时间）才能真实建卡发信'));
     assert.ok(h.logged('预演结果（批次 1，Shopify 上什么都没改）'));
     assert.equal(h.reports.length, 1, 'the Excel gets the dry run in its run log');
 
@@ -468,7 +472,7 @@ describe('issue: argument and date guards', () => {
     h.clock.ms = Date.parse('2026-10-05T06:59:00Z'); // 2026-10-04 23:59 in Los Angeles
     const early = await h.run({ limit: 1 });
     assert.equal(early.exitCode, 2);
-    assert.ok(h.logged('正式活动要到 2026-10-05（店铺时间）才能建卡发信'));
+    assert.ok(h.logged('A 组（有下单）要到 2026-10-05（店铺时间，LAUNCH_DATE）才能建卡发信'));
     assert.equal(h.fake.state.calls.token.length, 0);
     assert.equal(fs.existsSync(h.paths.journal), false);
 
@@ -602,7 +606,8 @@ describe('issue: argument and date guards', () => {
     assert.deepEqual(h.createdFor(), [1, 2]);
     assert.equal(h.fake.state.calls.create[0].initialAmount.amount, '0.10');
     assert.equal(h.fake.state.calls.create[0].note, 'gift-card-promo [campaign:2026-10-test]');
-    assert.deepEqual(h.fake.state.calls.tag.map((t) => t.tags), [['OCT26RTPROMO-TEST'], ['OCT26RTPROMO-TEST']]);
+    // A test campaign has no groups; the group tag follows each customer's order count (none here).
+    assert.deepEqual(h.fake.state.calls.tag.map((t) => t.tags), [['OCT26RTPROMO-TEST', 'OCT26RTPROMO-TEST-NEVER'], ['OCT26RTPROMO-TEST', 'OCT26RTPROMO-TEST-NEVER']]);
     assert.deepEqual(summary.skipped, {});
   });
 
@@ -779,7 +784,7 @@ describe('issue: on or after the expiry date (no new cards)', () => {
     assert.equal(h.previews.length, 0);
     assert.deepEqual(h.createdFor(), [1, 2, 3]);
     assert.equal(lines.filter((l) => l.includes('已到礼品卡到期日（2026-10-19）：只补记和补打 tag，不建新卡')).length, 2, 'both banners say it from the start');
-    assert.ok(lines.includes('INFO 真实运行：只补记 Shopify 上已有的卡、补打 tag gift-card-sent-2026-10；不建新卡，不发邮件'));
+    assert.ok(lines.includes('INFO 真实运行：只补记 Shopify 上已有的卡、补打 tag gift-card-sent-2026-10（和组 tag）；不建新卡，不发邮件'));
     assert.equal(lines.some((l) => l.includes('真实运行：会建礼品卡')), false, 'the live banner does not promise cards');
   });
 
@@ -958,7 +963,7 @@ describe('issue --repair-only', () => {
     assertSummary(summary, { attempted: 0, created: 0, tagFixed: 1 });
     assert.equal(summary.newCardsRefused, undefined);
     const start = h.journal().filter((e) => e.op === 'run.start').at(-1);
-    assertSummary(start, { dryRun: false, limit: null, options: { retryFailed: false, repairOnly: true } });
+    assertSummary(start, { dryRun: false, limit: null, options: { group: 'ordered', retryFailed: false, repairOnly: true } });
     const end = h.journal().at(-1);
     assert.equal(end.summary.repairOnly, true);
     assert.equal(end.exitCode, 0);
@@ -975,7 +980,7 @@ describe('issue --repair-only', () => {
     assert.equal(exitCode, 0);
     for (const k of [1, 2]) {
       assert.equal(h.entriesFor(k, 'reconcile.found')[0].source, 'preflight');
-      assert.deepEqual(h.customer(k).tags, [TAG]);
+      assert.deepEqual(h.customer(k).tags, [TAG, TAG_ORDERED]);
       assert.equal(h.statusOf(k), STATUS.DONE);
     }
     assert.deepEqual(h.createdFor(), [1, 2]);
@@ -1195,7 +1200,7 @@ describe('issue: rejected creates', () => {
     }
     assert.equal(h.statusOf(7), STATUS.PENDING);
     assert.equal(h.cardsOf(7).length, 0);
-    assert.deepEqual(h.journal().filter((e) => e.op === 'run.start').at(-1).options, { retryFailed: true, repairOnly: false });
+    assert.deepEqual(h.journal().filter((e) => e.op === 'run.start').at(-1).options, { group: 'ordered', retryFailed: true, repairOnly: false });
   });
 
   it('throttled on every retry: create.rejected, the run stops, the row is pending again', async () => {
@@ -1230,7 +1235,7 @@ describe('issue: tags and Shopify-side guards', () => {
     assert.equal(h.fake.opsNamed('GiftCardCreate').length, 1);
     assert.equal(h.cardsOf(1).length, 1);
     assert.equal(h.statusOf(1), STATUS.DONE);
-    assert.deepEqual(h.customer(1).tags, [TAG]);
+    assert.deepEqual(h.customer(1).tags, [TAG, TAG_ORDERED]);
   });
 
   it('journal deleted: customers already carrying SENT_TAG are skipped even when their cards are not visible', async () => {
@@ -1264,7 +1269,9 @@ describe('issue: tags and Shopify-side guards', () => {
       assert.equal(h.statusOf(k), STATUS.DONE);
       assert.equal(h.cardsOf(k).length, 1);
     }
-    assert.equal(h.fake.opsNamed('TagsAdd').length - tagCallsBefore, 2, 'only the 2 new cards were tagged');
+    // 2 tagsAdd for the new cards + 2 best-effort group-tag calls for the recorded ones (SENT_TAG was already there).
+    assert.equal(h.fake.opsNamed('TagsAdd').length - tagCallsBefore, 4);
+    for (const k of [1, 2, 3, 4]) assert.deepEqual(h.customer(k).tags, [TAG, TAG_ORDERED], `customer ${k} carries both tags`);
     assert.deepEqual(h.createdFor(), [1, 2, 3, 4]);
     assertSummary(summary, { reconciled: 2, tagFixed: 2, created: 2 });
   });
@@ -1280,7 +1287,7 @@ describe('issue: tags and Shopify-side guards', () => {
     for (const k of [1, 2]) {
       assert.equal(h.entriesFor(k, 'reconcile.found')[0].source, 'preflight');
       assert.equal(h.cardsOf(k).length, 1);
-      assert.deepEqual(h.customer(k).tags, [TAG], 'the tag is added back');
+      assert.deepEqual(h.customer(k).tags, [TAG, TAG_ORDERED], 'the tags are added back');
       assert.equal(h.statusOf(k), STATUS.DONE);
     }
     assert.deepEqual(h.createdFor(), [1, 2, 3, 4]);
@@ -1341,5 +1348,140 @@ describe('issue: interruption and the Excel', () => {
     assert.equal((await h.run({ limit: 1, writeReport: broken })).exitCode, 0);
     assert.ok(h.logged('WARN Excel 没有更新：excel is locked'));
     assert.deepEqual(h.createdFor(), [1]);
+  });
+});
+
+describe('issue: the two groups (--group ordered / never)', () => {
+  /**
+   * Customers 1–3 have ordered (group "ordered"), 4–6 never have (group "never"). The never
+   * group is issued newest registration first: 6, 5, 4.
+   */
+  function mixedCustomers() {
+    return [
+      ...[1, 2, 3].map((n) => makeCustomer({ n, lastOrder: makeOrder({ n: 500 + n, createdAt: '2026-03-01T12:00:00Z', total: TOTALS[n - 1] }) })),
+      ...[4, 5, 6].map((n) => makeCustomer({ n, createdAt: `2025-0${n}-01T00:00:00Z` })),
+    ];
+  }
+
+  it('the real campaign requires --group (dry run and live); --repair-only does not; a test campaign ignores it', async () => {
+    await setup({ customers: mixedCustomers() });
+    for (const dryRun of [true, false]) {
+      h.config = { ...h.config, dryRun };
+      const { exitCode } = await h.run({ group: null, limit: 2 });
+      assert.equal(exitCode, 2, `dryRun=${dryRun}`);
+      assert.ok(h.logged('请用 --group 指定这次发哪一组'));
+    }
+    assert.equal(h.fake.state.calls.token.length, 0, 'refused before connecting');
+    assert.equal(fs.existsSync(h.paths.journal), false);
+    assert.equal((await h.run({ group: 'both', limit: 2 })).exitCode, 2);
+    assert.ok(h.logged('--group 只能是 ordered（有下单的客户）或 never（从没下单的客户），收到 "both"'));
+
+    h.config = { ...h.config, dryRun: false };
+    assert.equal((await h.run({ group: null, repairOnly: true })).exitCode, 0, 'repair-only repairs both groups');
+    assert.deepEqual(h.createdFor(), []);
+
+    // A test campaign: no groups, --group is ignored with a note.
+    const customers = [makeCustomer({ n: 1, lastOrder: makeOrder({ n: 501, createdAt: '2026-03-01T12:00:00Z', total: '50.00' }) }), makeCustomer({ n: 2 })];
+    h.fake.restore();
+    h.cleanup();
+    await setup({ customers, testCampaign: true, env: { CAMPAIGN_ID: '2026-10-test', SENT_TAG: 'OCT26RTPROMO-TEST', TEST_CUSTOMER_IDS: '1,2' } });
+    h.config = { ...h.config, dryRun: false };
+    const test = await h.run({ group: 'never', limit: 5 });
+    assert.equal(test.exitCode, 0);
+    assert.ok(h.logged('测试活动不分组：忽略 --group never'));
+    assert.deepEqual(h.createdFor(), [1, 2], 'both test customers, whatever the group');
+    assert.deepEqual(h.fake.state.calls.tag.map((t) => t.tags), [
+      ['OCT26RTPROMO-TEST', 'OCT26RTPROMO-TEST-ORDERED'], // customer 1 has an order
+      ['OCT26RTPROMO-TEST', 'OCT26RTPROMO-TEST-NEVER'],
+    ]);
+    assert.equal(test.summary.group, null);
+  });
+
+  it('each run issues its group only, with that group\'s tag; the other group stays pending and is reported', async () => {
+    await setup({ customers: mixedCustomers() });
+    const a = await h.run({ group: 'ordered', limit: 10 });
+    assert.equal(a.exitCode, 0);
+    assert.deepEqual(h.createdFor(), [1, 2, 3], 'only the customers who have ordered');
+    assert.deepEqual(h.fake.state.calls.tag.map((t) => t.tags), [1, 2, 3].map(() => [TAG, TAG_ORDERED]));
+    assert.equal(a.summary.group, 'ordered');
+    assert.ok(h.logged('批次 1｜活动 2026-10｜A 组（有下单），共 3 人'));
+    assert.ok(h.logged('然后给客户打 tag gift-card-sent-2026-10 和 gift-card-sent-2026-10-ORDERED'));
+    assert.ok(h.logged('A 组（有下单）里已经没有更多待发放的人了'));
+    assert.ok(h.logged('A 组（有下单）共 3 人，现在还有 0 人待发放；B 组（从没下单）共 3 人，还有 3 人待发放（要用 --group never 单独发）'));
+    for (const k of [4, 5, 6]) assert.equal(h.statusOf(k), STATUS.PENDING);
+    assert.deepEqual(h.journal().find((e) => e.op === 'tag.ok').tags, [TAG, TAG_ORDERED], 'the journal records both tags');
+
+    // Running the ordered group again: nothing left there, the never group untouched.
+    const again = await h.run({ group: 'ordered', limit: 10 });
+    assert.equal(again.exitCode, 0);
+    assert.deepEqual(h.createdFor(), [1, 2, 3]);
+
+    const b = await h.run({ group: 'never', limit: 10 });
+    assert.equal(b.exitCode, 0);
+    assert.deepEqual(h.createdFor(), [1, 2, 3, 6, 5, 4], 'the never group in its own order: newest registration first');
+    assert.deepEqual(h.fake.state.calls.tag.slice(3).map((t) => t.tags), [6, 5, 4].map(() => [TAG, TAG_NEVER]));
+    for (const k of [4, 5, 6]) assert.deepEqual(h.customer(k).tags, [TAG, TAG_NEVER]);
+    assert.ok(h.logged('B 组（从没下单）共 3 人，现在还有 0 人待发放；A 组（有下单）共 3 人，还有 0 人待发放'));
+    assert.equal(b.summary.group, 'never');
+  });
+
+  it('a dry run previews its group only: the first email uses the first person of that group', async () => {
+    await setup({ customers: mixedCustomers(), env: { DRY_RUN: 'true' } });
+    const { exitCode, summary } = await h.run({ group: 'never' });
+    assert.equal(exitCode, 0);
+    assert.equal(summary.attempted, 3);
+    assert.ok(h.logged('预演：这一批会给 3 人建卡，序号 4–6'));
+    assert.equal(h.previews.at(-1).recipient.customerId, gid('Customer', 6), 'the first of the never group (newest registration)');
+    assert.ok(h.logged('B 组（从没下单）共 3 人，这一批之后还有 0 人待发放；A 组（有下单）共 3 人，还有 3 人待发放（要用 --group ordered 单独发）'));
+    assert.equal(h.fake.state.calls.create.length, 0);
+  });
+
+  it('the never group waits for LAUNCH_DATE_NEVER, the ordered group for LAUNCH_DATE', async () => {
+    await setup({ customers: mixedCustomers(), env: { LAUNCH_DATE: '2026-10-07', LAUNCH_DATE_NEVER: '2026-10-12' } });
+
+    // 2026-10-07 10:00 in Los Angeles: the ordered group may go, the never group may not.
+    h.clock.ms = Date.parse('2026-10-07T17:00:00Z');
+    const earlyNever = await h.run({ group: 'never', limit: 10 });
+    assert.equal(earlyNever.exitCode, 2);
+    assert.ok(h.logged('B 组（从没下单）要到 2026-10-12（店铺时间，LAUNCH_DATE_NEVER）才能建卡发信'));
+    assert.deepEqual(h.createdFor(), []);
+    assert.equal((await h.run({ group: 'ordered', limit: 10 })).exitCode, 0);
+    assert.deepEqual(h.createdFor(), [1, 2, 3]);
+
+    // A dry run of the never group before its day only warns.
+    h.config = { ...h.config, dryRun: true };
+    const dry = await h.run({ group: 'never' });
+    assert.equal(dry.exitCode, 0);
+    assert.ok(h.logged('注意：B 组（从没下单）要到 2026-10-12（店铺时间）才能真实建卡发信；预演不受这个限制'));
+
+    // 2026-10-06 (before LAUNCH_DATE): the ordered group is refused too.
+    h.clock.ms = Date.parse('2026-10-06T17:00:00Z');
+    h.config = { ...h.config, dryRun: false };
+    h.fake.state.calls.create.length = 0;
+    const earlyOrdered = await h.run({ group: 'ordered', limit: 10 });
+    assert.equal(earlyOrdered.exitCode, 2);
+    assert.ok(h.logged('A 组（有下单）要到 2026-10-07（店铺时间，LAUNCH_DATE）才能建卡发信'));
+
+    // 2026-10-12 00:00 in Los Angeles: the never group goes.
+    h.clock.ms = Date.parse('2026-10-12T07:00:00Z');
+    const onTime = await h.run({ group: 'never', limit: 10 });
+    assert.equal(onTime.exitCode, 0);
+    assert.deepEqual(h.createdFor(), [6, 5, 4]);
+  });
+});
+
+describe('issue: the Shopify tag search matches prefixes; only the exact tag counts', () => {
+  it('a customer who carries only a test-campaign tag (SENT_TAG-TEST7) or the used tag is not "already tagged"', async () => {
+    const customers = qualifyingCustomers(3);
+    customers[0].tags = [`${TAG}-TEST7`]; // from an earlier test campaign: not this campaign's tag
+    customers[1].tags = [`${TAG}-used`]; // only the used-card tag (any case): not the sent tag either
+    customers[2].tags = [TAG.toUpperCase()]; // the sent tag, other case: tags are case-insensitive
+    await setup({ customers });
+    const { exitCode, summary } = await h.run({ limit: 10 });
+    assert.equal(exitCode, 0);
+    assert.deepEqual(h.createdFor(), [1, 2], 'customers 1 and 2 get a card');
+    assert.deepEqual(summary.skipped, {}, 'neither of them is taken for already tagged');
+    // Customer 3 carries the sent tag itself (other case): select already left them out (rule 6).
+    assert.equal(h.selection.recipients.some((r) => r.customerId === gid('Customer', 3)), false);
   });
 });

@@ -611,7 +611,7 @@ describe('excel report', () => {
   test('说明 explains sheets, columns, statuses and the tier rule', async () => {
     await writeReport({ config: env.config, paths, log: memoryLog(), now: FIXED_NOW, lockOptions: FAST_LOCK });
     const ws = (await openBook(paths.excel)).getWorksheet('说明');
-    for (const title of [...RECIPIENT_HEADERS, '汇总', '未入选', '待发放', '已建卡未打tag', '档位 1', '档位 3', '提醒邮件（Shopify Email）', '怎么发', '收件人条件', '用卡 tag']) {
+    for (const title of [...RECIPIENT_HEADERS, '汇总', '未入选', '待发放', '已建卡未打tag', '档位 1', '档位 3', '提醒邮件（Shopify Email）', '怎么发', '第一次提醒的收件人条件', '第二次提醒的收件人条件', '用卡 tag']) {
       assert.ok(findRow(ws, 1, title), `说明 mentions ${title}`);
     }
     assert.equal(cellValue(ws, findRow(ws, 1, '档位 2'), 2), '基数 $10.78–$15.33 → $15.33');
@@ -1125,11 +1125,14 @@ describe('excel review fixes', () => {
 
   test('D5: 汇总 shows the current .env launch date, with a note when it changed after select; the expiry stays frozen; no reminder dates', async () => {
     writeFixtureJournal(paths, amount);
-    const moved = { ...env.config, launchDate: '2026-10-06', giftCardExpiresOn: '2026-10-20' };
+    const moved = { ...env.config, launchDate: '2026-10-06', launchDateNever: '2026-10-13', giftCardExpiresOn: '2026-10-20' };
     await writeReport({ config: moved, paths, log: memoryLog(), now: FIXED_NOW, lockOptions: FAST_LOCK });
     const sum = (await openBook(paths.excel)).getWorksheet('汇总');
-    assert.deepEqual(rowValues(sum, findRow(sum, 1, '首封邮件日期（正式建卡）'), 3), ['首封邮件日期（正式建卡）', wall(2026, 10, 6), '生成名单时为 2026-10-05，现在按 .env 为 2026-10-06']);
-    assert.equal(sum.getRow(findRow(sum, 1, '首封邮件日期（正式建卡）')).getCell(3).font?.color?.argb, 'FFC00000');
+    assert.deepEqual(rowValues(sum, findRow(sum, 1, 'A 组建卡日（有下单，LAUNCH_DATE）'), 3), ['A 组建卡日（有下单，LAUNCH_DATE）', wall(2026, 10, 6), '生成名单时为 2026-10-05，现在按 .env 为 2026-10-06']);
+    assert.equal(sum.getRow(findRow(sum, 1, 'A 组建卡日（有下单，LAUNCH_DATE）')).getCell(3).font?.color?.argb, 'FFC00000');
+    // The never group's day: the list was made without one, .env now has one.
+    assert.deepEqual(rowValues(sum, findRow(sum, 1, 'B 组建卡日（从没下单，LAUNCH_DATE_NEVER）'), 3), ['B 组建卡日（从没下单，LAUNCH_DATE_NEVER）', wall(2026, 10, 13), '生成名单时为 未设置，现在按 .env 为 2026-10-13']);
+    assert.deepEqual(rowValues(sum, findRow(sum, 1, '组 tag（建卡时和发放 tag 一起打）'), 2), ['组 tag（建卡时和发放 tag 一起打）', `${env.config.sentTag}-ORDERED / ${env.config.sentTag}-NEVER`]);
     const expiry = rowValues(sum, findRow(sum, 1, '礼品卡到期日'), 3);
     assert.deepEqual(expiry.slice(0, 2), ['礼品卡到期日', wall(2026, 10, 19)], 'cards are created with the frozen expiry');
     assert.equal(expiry[2], '到期日当天仍可使用。注意：.env 的 GIFT_CARD_EXPIRES_ON 现在是 2026-10-20，但建卡仍用生成名单时的 2026-10-19');
@@ -1148,7 +1151,7 @@ describe('excel review fixes', () => {
     const result = await write();
     assert.deepEqual(result.warnings, []);
     const sum = (await openBook(paths.excel)).getWorksheet('汇总');
-    assert.deepEqual(rowValues(sum, findRow(sum, 1, '首封邮件日期（正式建卡）'), 3), ['首封邮件日期（正式建卡）', wall(2026, 10, 5), null]);
+    assert.deepEqual(rowValues(sum, findRow(sum, 1, 'A 组建卡日（有下单，LAUNCH_DATE）'), 3), ['A 组建卡日（有下单，LAUNCH_DATE）', wall(2026, 10, 5), null]);
     assert.deepEqual(rowValues(sum, findRow(sum, 1, '礼品卡到期日'), 3), ['礼品卡到期日', wall(2026, 10, 19), '到期日当天仍可使用']);
     for (let r = 1; r <= sum.rowCount; r += 1) {
       for (let c = 1; c <= 8; c += 1) assert.doesNotMatch(String(cellValue(sum, r, c) ?? ''), /生成名单时为|GIFT_CARD_EXPIRES_ON 现在是|提醒/);
@@ -1699,6 +1702,9 @@ describe('excel used-card tag', () => {
     assert.equal(usedTagName('OCT26RTPROMO-TEST2'), 'OCT26RTPROMO-TEST2-USED');
     assert.equal(usedTagName(env.config.sentTag), USED_TAG);
     assert.equal(reminderSegmentCondition('OCT26RTPROMO'), "customer_tags CONTAINS 'OCT26RTPROMO' AND NOT customer_tags CONTAINS 'OCT26RTPROMO-USED'");
+    assert.equal(reminderSegmentCondition('OCT26RTPROMO', 'ordered'), "customer_tags CONTAINS 'OCT26RTPROMO-ORDERED' AND NOT customer_tags CONTAINS 'OCT26RTPROMO-USED'");
+    assert.equal(reminderSegmentCondition('OCT26RTPROMO', 'never'), "customer_tags CONTAINS 'OCT26RTPROMO-NEVER' AND NOT customer_tags CONTAINS 'OCT26RTPROMO-USED'");
+    assert.equal(usageSegmentCondition('OCT26RTPROMO', 'ordered'), reminderSegmentCondition('OCT26RTPROMO', 'ordered'));
     for (const sentTag of ['OCT26RTPROMO', 'OCT26RTPROMO-TEST2', env.config.sentTag]) {
       assert.equal(usedTagName(sentTag), usageUsedTagName(sentTag), sentTag);
       assert.equal(reminderSegmentCondition(sentTag), usageSegmentCondition(sentTag), sentTag);
@@ -1792,7 +1798,8 @@ describe('excel used-card tag', () => {
     const help = wb.getWorksheet('说明');
     assert.ok(findRow(help, 1, '提醒邮件（Shopify Email）'), 'its own section');
     assert.equal(valueOf(help, '怎么发'), '提醒邮件不再由程序发送，改用 Shopify Email。发提醒前先运行一次 usage，让用过卡的客户带上 OCT26RTPROMO-USED；然后在 Shopify Email 里用下面的收件人条件发送。');
-    assert.equal(valueOf(help, '收件人条件'), "customer_tags CONTAINS 'OCT26RTPROMO' AND NOT customer_tags CONTAINS 'OCT26RTPROMO-USED'");
+    assert.equal(valueOf(help, '第一次提醒的收件人条件'), "customer_tags CONTAINS 'OCT26RTPROMO-ORDERED' AND NOT customer_tags CONTAINS 'OCT26RTPROMO-USED'（只发 A 组有下单的客户：B 组当天才收到首封邮件）");
+    assert.equal(valueOf(help, '第二次提醒的收件人条件'), "customer_tags CONTAINS 'OCT26RTPROMO' AND NOT customer_tags CONTAINS 'OCT26RTPROMO-USED'（两组一起）");
     const tag = valueOf(help, '用卡 tag', 2);
     // the column help comes first (发放名单各列), the section item later: both name the tag
     const items = [];
@@ -1830,7 +1837,8 @@ describe('excel used-card tag', () => {
     const wb = await openBook(paths.excel);
     assert.deepEqual(await usedTagColumn([1, 2]), ['是', '否']);
     const help = wb.getWorksheet('说明');
-    assert.equal(valueOf(help, '收件人条件'), "customer_tags CONTAINS 'OCT26RTPROMO-TEST2' AND NOT customer_tags CONTAINS 'OCT26RTPROMO-TEST2-USED'");
+    assert.equal(valueOf(help, '第二次提醒的收件人条件'), "customer_tags CONTAINS 'OCT26RTPROMO-TEST2' AND NOT customer_tags CONTAINS 'OCT26RTPROMO-TEST2-USED'（两组一起）");
+    assert.equal(valueOf(help, '第一次提醒的收件人条件'), "customer_tags CONTAINS 'OCT26RTPROMO-TEST2-ORDERED' AND NOT customer_tags CONTAINS 'OCT26RTPROMO-TEST2-USED'（只发 A 组有下单的客户：B 组当天才收到首封邮件）");
     const log = wb.getWorksheet('操作日志');
     assert.deepEqual(logRow(log, 1, '打用卡 tag').slice(5, 6), ['已打 OCT26RTPROMO-TEST2-USED']);
     assert.deepEqual(logRow(log, 2, '打用卡 tag 失败').slice(5), ['OCT26RTPROMO-TEST2-USED 没打上，下次运行 usage 会再试', '7002', '网络错误：fetch failed']);

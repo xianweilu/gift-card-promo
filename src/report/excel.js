@@ -40,6 +40,8 @@ import {
   errorText,
   summaryText,
   usedTagName,
+  groupTagName,
+  ISSUE_GROUPS,
   reminderHelp,
 } from './labels.js';
 
@@ -916,6 +918,7 @@ function buildContext({ config, selection, entries, journal, tags, verify, usage
   const expiryFrozen = params.giftCardExpiresOn || '';
   const dates = {
     launch: dateSetting(config.launchDate, params.launchDate),
+    launchNever: dateSetting(config.launchDateNever, params.launchDateNever),
     expiry: { frozen: expiryFrozen, env: config.giftCardExpiresOn || '', changed: expiryFrozen !== (config.giftCardExpiresOn || '') },
   };
 
@@ -988,6 +991,13 @@ function buildContext({ config, selection, entries, journal, tags, verify, usage
     },
   };
   base.progress = computeProgress(rows);
+  // Per group (issue --group): recipients who have ordered vs. never; a test list has neither.
+  base.progressByGroup = ISSUE_GROUPS.map((group) => ({
+    group,
+    launch: group === 'never' ? dates.launchNever : dates.launch,
+    tag: groupTagName(sentTag, group),
+    ...computeProgress(rows.filter((row) => row.r.kind === group)),
+  })).filter((g) => g.total.count > 0);
   base.usageSummary = usage ? normalizeUsageSummary(usage, cards) : null;
   base.usedTagStats = usage ? usedTagStats(usage, usedTaggedIds, journal.runs) : null;
   return base;
@@ -1249,7 +1259,12 @@ async function writeSummarySheet(book, ctx) {
     expiry.changed ? CHANGED : NOTE,
   );
   await kv(S.launchDate, ctx.ymd(launch.current) ?? T.notSet, 'date', launch.changed ? changedNote(launch) : null, CHANGED);
+  if (!ctx.isTest) {
+    const { launchNever } = ctx.dates;
+    await kv(S.launchDateNever, ctx.ymd(launchNever.current) ?? T.notSet, 'date', launchNever.changed ? changedNote(launchNever) : null, CHANGED);
+  }
   await kv(S.sentTag, ctx.sentTag);
+  await kv(S.groupTags, ISSUE_GROUPS.map((g) => groupTagName(ctx.sentTag, g)).join(' / '));
   if (!ctx.isTest) {
     const list = (v, f = String) => (Array.isArray(v) ? txt(v.map(f).join(', ')) : txt(v));
     await kv(S.excludeTags, list(params.excludeTags));
@@ -1327,6 +1342,16 @@ async function writeSummarySheet(book, ctx) {
     for (const [reason, n] of [...p.skipReasons].sort((a, b) => b[1] - a[1])) await trow([issueSkipText(reason, undefined, undefined, T) || S.reasonMissing, n], ['text', 'count']);
   }
   await s.add([S.progressNote], NOTE);
+  if (ctx.progressByGroup.length) {
+    await s.blank();
+    await s.header(S.progressByGroupHeader);
+    for (const g of ctx.progressByGroup) {
+      const count = (status) => g.byStatus.get(status)?.count ?? 0;
+      const other = g.total.count - count('done') - count('pending');
+      await trow([labelOf(T.KIND_LABELS, g.group), ctx.ymd(g.launch.current) ?? T.notSet, g.total.count, count('done'), count('pending'), other], ['text', 'date', 'count', 'count', 'count', 'count']);
+    }
+    await s.add([S.progressByGroupNote], NOTE);
+  }
 
   // ---- usage
   if (ctx.usageSummary) {

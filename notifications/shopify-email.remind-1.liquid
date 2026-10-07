@@ -1,5 +1,8 @@
 {%- comment -%}
-  First reminder – Shopify Email code template (send on 2026-10-12).
+  First reminder – Shopify Email code template (send on 2026-10-12), to group A
+  only: the customers who have ordered before (issue --group ordered, tagged
+  OCT26RTPROMO-ORDERED on 10/7). Group B (never ordered) gets its first email
+  on 10/12 and only the second reminder.
 
   How to use (Shopify admin → Marketing → Shopify Email → Create email → Code):
     1. Run `node index.js usage` first, so customers who already used their card
@@ -7,13 +10,14 @@
     2. Paste this whole file into the code editor (the editor wants a fragment:
        no <!DOCTYPE>, <html>, <head> or <body>; Shopify wraps it).
     3. Right-hand panel:
-         To            segment: customer_tags CONTAINS 'OCT26RTPROMO' AND NOT customer_tags CONTAINS 'OCT26RTPROMO-USED'
+         To            segment: customer_tags CONTAINS 'OCT26RTPROMO-ORDERED' AND NOT customer_tags CONTAINS 'OCT26RTPROMO-USED'
          Subject       ⏰ TIME IS RUNNING OUT: Your LA Balloons CASH expires Oct. 19th!
          Preview text  If you don't use your credit at LABalloons.com by October 19, 2026, you lose it.
     4. "Send test" to yourself, then schedule or send.
 
   Shopify Email has no gift_card variables, so this email cannot link to the
-  card page; a customer who lost the code is told to reply.
+  card page; it says the code was emailed on October 7 (group A's day) and a
+  customer who lost it is told to reply.
   Dates are written out by hand (10/19/2026) – change them here if the expiry
   date changes. Templates must include {{ unsubscribe_link }} (it renders the
   unsubscribe link itself) and {{ open_tracking_block }}; both are at the end.
@@ -49,13 +53,14 @@
               </tr>
             </table>
 
-            <p style="margin: 0 0 24px 0;">Can&rsquo;t find your credit code? Just reply to this email and we&rsquo;ll send it again.</p>
+            <p style="margin: 0 0 24px 0;">Your credit code was sent to your email on October 7, 2026.<br>
+            Can&rsquo;t find it? Just reply to this email and we&rsquo;ll send your code again.</p>
             <p style="margin: 0 0 24px 0;">Shop now before it&rsquo;s too late!</p>
             <p style="margin: 0 0 24px 0;">We appreciate your business, and thank you for trusting us with your balloon and party supply needs!</p>
             <p style="margin: 0 0 24px 0;">Your support means the world to our team.</p>
             <p style="margin: 0 0 24px 0;">- LA Balloons</p>
-            <p style="margin: 0; font-size: 12px; line-height: 1.5;"><strong>** Terms &amp; Conditions:</strong><br>
-            This voucher is distributed entirely for free as part of a temporary marketing promotion; no monetary value or thing of value was paid in exchange for it. <span style="color: #FF2600;">No cash value &amp; non-transferable.</span> Valid only for merchandise online at <a href="{{ shop.url }}" style="color: #1990C6;">www.laballoons.com</a>. This code cannot be redeemed for cash, and is explicitly exempt from California&rsquo;s mandatory gift certificate cash-out regulations. Lost, deleted, or stolen promotional codes will not be replaced. Expires on 10/19/2026.</p>
+            <p style="margin: 0; font-size: 10px; line-height: 1.5;"><strong>** Terms &amp; Conditions:</strong><br>
+            This voucher is distributed entirely for free as part of a temporary marketing promotion; no monetary value or thing of value was paid in exchange for it. No cash value &amp; non-transferable. Valid only for merchandise online at <a href="{{ shop.url }}" style="color: #1990C6;">www.laballoons.com</a>. This code cannot be redeemed for cash, and is explicitly exempt from California&rsquo;s mandatory gift certificate cash-out regulations. Lost, deleted, or stolen promotional codes will not be replaced. Expires on 10/19/2026.</p>
           </td>
         </tr>
 

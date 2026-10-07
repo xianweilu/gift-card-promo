@@ -107,6 +107,7 @@ async function dispatch(args, config) {
       try {
         return (await runIssue({
           config,
+          group: args.group,
           limit: args.limit,
           retryFailed: args.retryFailed,
           repairOnly: args.repairOnly,

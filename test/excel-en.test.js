@@ -452,12 +452,13 @@ describe('labels.js in English', () => {
 
   test('reminderHelp: the Shopify Email section in English, with the campaign\'s tags', () => {
     const rows = reminderHelp('OCT26RTPROMO', 'en');
-    assert.deepEqual(rows.map(([item]) => item), ['How reminders are sent', 'Recipient condition', 'Used tag']);
-    assert.equal(rows[1][1], "customer_tags CONTAINS 'OCT26RTPROMO' AND NOT customer_tags CONTAINS 'OCT26RTPROMO-USED'");
+    assert.deepEqual(rows.map(([item]) => item), ['How reminders are sent', 'First reminder, recipient condition', 'Second reminder, recipient condition', 'Used tag']);
+    assert.equal(rows[1][1], "customer_tags CONTAINS 'OCT26RTPROMO-ORDERED' AND NOT customer_tags CONTAINS 'OCT26RTPROMO-USED' (group A, customers who ordered before, only: group B gets its first email that day)");
+    assert.equal(rows[2][1], "customer_tags CONTAINS 'OCT26RTPROMO' AND NOT customer_tags CONTAINS 'OCT26RTPROMO-USED' (both groups)");
     assert.match(rows[0][1], /^The program no longer sends reminder emails; they go out with Shopify Email\. Before a reminder, run usage once so that everyone who used their card carries OCT26RTPROMO-USED;/);
-    assert.match(rows[2][1], /^OCT26RTPROMO-USED: every usage run \(DRY_RUN does not matter\)/);
+    assert.match(rows[3][1], /^OCT26RTPROMO-USED: every usage run \(DRY_RUN does not matter\)/);
     for (const [item, text] of rows) assert.doesNotMatch(`${item} ${text}`, CJK);
-    assert.deepEqual(reminderHelp('OCT26RTPROMO').map(([item]) => item), ['怎么发', '收件人条件', '用卡 tag']);
+    assert.deepEqual(reminderHelp('OCT26RTPROMO').map(([item]) => item), ['怎么发', '第一次提醒的收件人条件', '第二次提醒的收件人条件', '用卡 tag']);
   });
 });
 
@@ -674,7 +675,7 @@ describe('English workbook', () => {
     assert.deepEqual(rowValues(H, 1), ['Item', 'Explanation']);
     for (const name of Object.values(en.sheets)) assert.ok(texts.includes(name), `Help lists the "${name}" sheet`);
     for (const status of Object.values(en.STATUS_LABELS)) assert.ok(texts.includes(status));
-    for (const expected of ['Recipients columns', 'Has gift-card-sent-2026-10', 'Used tag', 'Notes/errors', 'Reminder emails (Shopify Email)', 'How reminders are sent', 'Recipient condition', "customer_tags CONTAINS 'gift-card-sent-2026-10' AND NOT customer_tags CONTAINS 'gift-card-sent-2026-10-USED'", 'Reasons people are skipped before issuing', 'Amount rules', 'Tier 1', 'base ≤ $10.77 → $10.77', 'Exit code 130', 'Read-only', 'Filtering']) {
+    for (const expected of ['Recipients columns', 'Has gift-card-sent-2026-10', 'Used tag', 'Notes/errors', 'Reminder emails (Shopify Email)', 'How reminders are sent', 'First reminder, recipient condition', "customer_tags CONTAINS 'gift-card-sent-2026-10-ORDERED' AND NOT customer_tags CONTAINS 'gift-card-sent-2026-10-USED' (group A, customers who ordered before, only: group B gets its first email that day)", "customer_tags CONTAINS 'gift-card-sent-2026-10' AND NOT customer_tags CONTAINS 'gift-card-sent-2026-10-USED' (both groups)", 'Reasons people are skipped before issuing', 'Amount rules', 'Tier 1', 'base ≤ $10.77 → $10.77', 'Exit code 130', 'Read-only', 'Filtering']) {
       assert.ok(texts.includes(expected), `Help has "${expected}"`);
     }
     assert.ok(texts.some((t) => t.startsWith('gift-card-sent-2026-10-USED: every usage run (DRY_RUN does not matter)')));

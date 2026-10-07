@@ -1,5 +1,6 @@
 {%- comment -%}
-  Second (last) reminder – Shopify Email code template (send on 2026-10-16).
+  Second (last) reminder – Shopify Email code template (send on 2026-10-16), to
+  both groups: everyone tagged OCT26RTPROMO who has not used their card.
 
   How to use (Shopify admin → Marketing → Shopify Email → Create email → Code):
     1. Run `node index.js usage` first, so customers who already used their card
@@ -7,7 +8,7 @@
     2. Paste this whole file into the code editor (the editor wants a fragment:
        no <!DOCTYPE>, <html>, <head> or <body>; Shopify wraps it).
     3. Right-hand panel:
-         To            segment: customer_tags CONTAINS 'OCT26RTPROMO' AND NOT customer_tags CONTAINS 'OCT26RTPROMO-USED'
+         To            segment: customer_tags CONTAINS 'OCT26RTPROMO' AND NOT customer_tags CONTAINS 'OCT26RTPROMO-USED'   (both groups)
          Subject       ⏳ Last chance! Your LA Balloons CASH disappears after Oct. 19th
          Preview text  Only a few days left to spend your credit at LABalloons.com.
     4. "Send test" to yourself, then schedule or send.
@@ -37,9 +38,9 @@
         <tr>
           <td style="padding: 8px 40px 24px 40px; font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif; font-size: 16px; line-height: 1.5; color: #333333; text-align: left;">
             <p style="margin: 0 0 16px 0;">Hello{% if promo_name != '' %} {{ promo_name }}{% endif %},</p>
-            <p style="margin: 0 0 16px 0;"><strong>This is your final reminder:</strong> your <strong>unused credit</strong> at <strong>LA Balloons</strong> expires on <strong>October 19, 2026</strong> &mdash; only a few days away!</p>
-            <p style="margin: 0 0 16px 0;">You can still use it on October 19th, but once that day is over the credit disappears for good. Don&rsquo;t let your money go to waste &mdash; spend it at <a href="{{ shop.url }}" style="color: #1990C6;">LABalloons.com</a> today.</p>
-            <p style="margin: 0 0 24px 0;">Can&rsquo;t find your credit code? Just reply to this email and we&rsquo;ll send it again.</p>
+            <p style="margin: 0 0 16px 0;"><strong>This is your final reminder:</strong> your <strong>unused credit</strong> at <strong>LA Balloons</strong> expires on <strong>October 19, 2026!</strong></p>
+            <p style="margin: 0 0 24px 0;">After that, the credit disappears for good.<br>
+            Don&rsquo;t let your money go to waste &mdash; spend it at <a href="{{ shop.url }}" style="color: #1990C6;">LABalloons.com</a> today!</p>
 
             <!-- Button -->
             <table cellpadding="0" cellspacing="0" border="0" align="center" style="margin: 0 auto 24px auto;">
@@ -50,11 +51,13 @@
               </tr>
             </table>
 
+            <p style="margin: 0 0 24px 0;">Can&rsquo;t find your credit code?<br>
+            Just reply to this email and we&rsquo;ll send it again!</p>
             <p style="margin: 0 0 24px 0;">We appreciate your business, and thank you for trusting us with your balloon and party supply needs!</p>
             <p style="margin: 0 0 24px 0;">Your support means the world to our team.</p>
             <p style="margin: 0 0 24px 0;">- LA Balloons</p>
-            <p style="margin: 0; font-size: 12px; line-height: 1.5;"><strong>** Terms &amp; Conditions:</strong><br>
-            This voucher is distributed entirely for free as part of a temporary marketing promotion; no monetary value or thing of value was paid in exchange for it. <span style="color: #FF2600;">No cash value &amp; non-transferable.</span> Valid only for merchandise online at <a href="{{ shop.url }}" style="color: #1990C6;">www.laballoons.com</a>. This code cannot be redeemed for cash, and is explicitly exempt from California&rsquo;s mandatory gift certificate cash-out regulations. Lost, deleted, or stolen promotional codes will not be replaced. Expires on 10/19/2026.</p>
+            <p style="margin: 0; font-size: 10px; line-height: 1.5;"><strong>** Terms &amp; Conditions:</strong><br>
+            This voucher is distributed entirely for free as part of a temporary marketing promotion; no monetary value or thing of value was paid in exchange for it. No cash value &amp; non-transferable. Valid only for merchandise online at <a href="{{ shop.url }}" style="color: #1990C6;">www.laballoons.com</a>. This code cannot be redeemed for cash, and is explicitly exempt from California&rsquo;s mandatory gift certificate cash-out regulations. Lost, deleted, or stolen promotional codes will not be replaced. Expires on 10/19/2026.</p>
           </td>
         </tr>
 
